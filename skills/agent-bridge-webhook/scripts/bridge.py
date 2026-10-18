@@ -4,7 +4,9 @@
   bridge.py intake [FILE|-]        validate a webhook JSON body, store it in inbox/, print a JSON
                                    verdict with the sanitized task/context brief path
   bridge.py reply REQUEST_ID RESULT_FILE [--worker W] [--status S]
-                                   sanitize RESULT_FILE into outbox/<id>.md and append to log.jsonl
+                                   sanitize RESULT_FILE into outbox/<id>.md (+ <id>.status.json) and log it
+  bridge.py progress REQUEST_ID "message"
+                                   append one sanitized line to progress/<id>.log (streamed by bridge_server.py)
 Root: $GROK_BRIDGE_ROOT (default /workspace/agent-bridge).
 """
 import json, os, re, subprocess, sys, time
@@ -36,6 +38,46 @@ def log(rec):
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
+MAX_PROGRESS_LINE = 500
+MAX_PROGRESS_FILE = 256_000
+
+
+def valid_id(rid):
+    return isinstance(rid, str) and bool(ID_RE.match(rid)) and not rid.startswith(".")
+
+
+def add_progress(rid, msg):
+    line = " ".join(sanitize_text(msg).split())[:MAX_PROGRESS_LINE]
+    if not line:
+        return None
+    path = d("progress", rid + ".log")
+    if os.path.exists(path) and os.path.getsize(path) > MAX_PROGRESS_FILE:
+        return None
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as f:
+        f.write(time.strftime("%H:%M:%S ") + line + "\n")
+    return path
+
+
+def ensure_return_channel():
+    """Best effort: (re)start tailscaled + bridge_server.py so the caller's --wait can connect. Never blocks."""
+    script = os.path.join(HERE, "bridge-serve.sh")
+    if os.environ.get("GROK_BRIDGE_NO_SERVE") or not os.access(script, os.X_OK):
+        return
+    try:
+        subprocess.Popen([script, "start"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass
+
+
+def progress(rid, msg):
+    if not valid_id(rid):
+        out({"ok": False, "error": "invalid request_id"}, 2)
+    path = add_progress(rid, msg)
+    out({"ok": bool(path), "request_id": rid, "progress": path})
+
+
 def out(obj, code=0):
     print(json.dumps(obj, ensure_ascii=False, indent=1))
     sys.exit(code)
@@ -51,7 +93,7 @@ def intake(src):
     except Exception:
         out({"ok": False, "error": "body is not a JSON object"}, 2)
     rid = body.get("request_id")
-    if not isinstance(rid, str) or not ID_RE.match(rid) or rid.startswith("."):
+    if not valid_id(rid):
         out({"ok": False, "error": "missing or invalid request_id"}, 2)
     task = body.get("task")
     if not isinstance(task, str) or not task.strip():
@@ -88,12 +130,14 @@ def intake(src):
             f.write(f"\n[context truncated at {MAX_CONTEXT} chars]\n")
     os.chmod(brief, 0o600)
     log({"request_id": rid, "event": "intake", "reply_type": rtype, "flags": flags})
+    add_progress(rid, "received by Grok Bot")
+    ensure_return_channel()
     out({"ok": True, "request_id": rid, "brief": brief, "reply_type": rtype,
          "risky_phrases": flags, "notes": notes, "outbox": d("outbox", rid + ".md")})
 
 
 def reply(rid, result, worker, status):
-    if not ID_RE.match(rid) or rid.startswith("."):
+    if not valid_id(rid):
         out({"ok": False, "error": "invalid request_id"}, 2)
     dst = d("outbox", rid + ".md")
     if os.path.exists(dst):
@@ -103,7 +147,17 @@ def reply(rid, result, worker, status):
     if r.returncode:
         out({"ok": False, "request_id": rid, "error": r.stderr.strip() or "sanitize failed"}, 2)
     os.chmod(dst, 0o600)
+    status = re.sub(r"[^A-Za-z0-9._-]", "", status)[:40] or "ok"
+    worker = re.sub(r"[^A-Za-z0-9._-]", "", worker)[:40] or "self"
+    meta = d("outbox", rid + ".status.json")
+    tmp = meta + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"request_id": rid, "status": status, "worker": worker,
+                   "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, f)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, meta)
     log({"request_id": rid, "event": "reply", "worker": worker, "status": status})
+    add_progress(rid, f"done: status {status}, worker {worker}")
     out({"ok": True, "request_id": rid, "outbox": dst, "bytes": os.path.getsize(dst)})
 
 
@@ -117,5 +171,7 @@ elif a[:1] == ["reply"] and len(a) >= 3:
         if rest[i] in opt:
             opt[rest[i]] = rest[i + 1]
     reply(a[1], a[2], opt["--worker"], opt["--status"])
+elif a[:1] == ["progress"] and len(a) >= 3:
+    progress(a[1], " ".join(a[2:]))
 else:
     sys.exit(__doc__)

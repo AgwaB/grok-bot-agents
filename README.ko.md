@@ -41,7 +41,7 @@ grok-bot-agents/
     │   └── references/{codex,claude-code,pi,omp}.md
     └── agent-bridge-webhook/
         ├── SKILL.md
-        └── scripts/bridge.py, sanitize_result.py, send-task.sh, bridge.env.example
+        └── scripts/bridge.py, bridge_server.py, bridge-serve.sh, sanitize_result.py, send-task.sh, bridge.env.example
 ```
 
 ## 가벼운 일과 무거운 일

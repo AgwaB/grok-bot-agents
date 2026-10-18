@@ -21,7 +21,7 @@ artifact paths.
 | `import-agents` | Copy existing CLI logins and settings from your registered computer to the box, file by file, with an allowlist and your approval for each copy |
 | `configure-agents` | Change models, reasoning, permission mode, routing, logins/keys and each CLI's native config |
 | `delegate-task` | Decide light vs heavy, route to a CLI (or the one you named), write a standalone brief, run it headless, report back. Includes read-only code review |
-| `agent-bridge-webhook` | Two-way handoff with agents on another machine or CI through a webhook routine and an outbox, with sanitizing in both directions |
+| `agent-bridge-webhook` | Two-way handoff with agents on another machine or CI through a webhook routine; answers stream back to the caller's terminal over Tailscale (`grok-send-task --wait`), with sanitizing in both directions |
 
 ## Flow
 
@@ -124,7 +124,7 @@ skills/
   import-agents/       SKILL.md, scripts/{import_plan.py, stage_tar.py, apply_import.sh}
   configure-agents/    SKILL.md, scripts/agents_config.py
   delegate-task/       SKILL.md, scripts/{run-agent.sh, route.py, summarize_run.py}, references/
-  agent-bridge-webhook/ SKILL.md, scripts/{bridge.py, sanitize_result.py, send-task.sh, bridge.env.example}
+  agent-bridge-webhook/ SKILL.md, scripts/{bridge.py, bridge_server.py, bridge-serve.sh, sanitize_result.py, send-task.sh, bridge.env.example}
 ```
 
 ## Testing and release

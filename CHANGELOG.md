@@ -15,7 +15,9 @@ First release.
   `--review` read-only review with a change guard, JSON summaries (`ok`, `error`, `timeout`,
   `rate_limited`).
 - `agent-bridge-webhook`: webhook routine spec, `bridge.py` intake/reply with validation, dedupe and
-  logging, `sanitize_result.py`, and a macOS/Linux `send-task.sh` sender.
+  logging, `sanitize_result.py`, and a macOS/Linux `send-task.sh` sender. Tailscale return channel:
+  `bridge_server.py` (token-auth long-poll + SSE), `bridge.py progress`, `bridge-serve.sh` keep-alive,
+  `grok-send-task --wait/--fetch` streams progress and prints the answer in the caller's terminal.
 - Named `grok-bot-agents` (was `grok-agents` during development). Scripts still read the legacy
   `~/.grok-agents/config.json`, `$GROK_AGENTS_CONFIG`, `$GROK_AGENTS_STATE` and
   `~/.config/grok-agents/bridge.env` when the new ones are absent.
