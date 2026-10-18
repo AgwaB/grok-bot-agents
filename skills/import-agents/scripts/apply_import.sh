@@ -83,7 +83,7 @@ def kind_of(rel):
         path = rel[len("_home/"):]
         if not package_root(path) or not any(path.startswith(r + "/") for r in PACKAGE_ROOTS): return None
     inner = parts[2:] if parts[:2] == ["npm", "node_modules"] else parts  # Pi npm overlay lives under node_modules
-    if parts[0] in SKIP_PARTS or set(inner) & {"__pycache__", "node_modules", ".git"}: return None
+    if rel.endswith(".pyc") or parts[0] in SKIP_PARTS or set(inner) & {"__pycache__", "node_modules", ".git"}: return None
     for pat, k in allow:
         if "*" in pat and "/" not in pat and "/" in rel: continue  # globs like *auth*.json: top-level files only
         if fnmatch.fnmatchcase(rel, pat): return k
@@ -117,8 +117,24 @@ def transform(data, rel, kind):
     try: t = data.decode("utf-8")
     except UnicodeDecodeError: return data, 0, 0
     n = 0
-    for v in home_variants:
-        n += t.count(v); t = t.replace(v, HOME)
+    def replace_home(value):
+        nonlocal n
+        for v in home_variants:
+            n += value.count(v); value = value.replace(v, HOME)
+        return value
+    if rel.endswith(".json") and home_variants:
+        # Decode first: escaped Unicode/Windows paths and quotes in HOME must stay valid JSON.
+        def walk(value):
+            if isinstance(value, str): return replace_home(value)
+            if isinstance(value, list): return [walk(v) for v in value]
+            if isinstance(value, dict): return {replace_home(k): walk(v) for k, v in value.items()}
+            return value
+        try:
+            obj = walk(json.loads(t))
+            if n: t = json.dumps(obj, indent=2) + "\n"
+        except ValueError: pass  # malformed configuration is left intact and reported by parity
+    else:
+        t = replace_home(t)
     return t.encode("utf-8"), n, len(ABS.findall(t))
 
 def dest_of(rel):
@@ -283,13 +299,11 @@ def install_deps():
             try:
                 r = subprocess.run(c, cwd=d, env=env, capture_output=True, text=True, timeout=300)
                 tried.append(c[1]); ok = r.returncode == 0
-                errs = [l for l in (r.stderr or r.stdout).splitlines() if l.strip() and "complete log" not in l and "_logs/" not in l]
-                last = (next((l for l in errs if " code " in l or "404" in l or "ERR" in l), errs[0] if errs else ""))[:200]
-            except Exception as e:
-                tried.append(c[1]); ok = False; last = str(e)[:200]
+            except Exception:
+                tried.append(c[1]); ok = False
             if ok: break
         res.append({"dir": rel, "ok": ok, "via": tried[-1]})
-        if not ok: warnings.append(f"{rel}: npm {' then '.join(tried)} failed ({last}); that extension may not load, so run it by hand")
+        if not ok: warnings.append(f"{rel}: npm {' then '.join(tried)} failed (output suppressed); that extension may not load, so run it by hand")
     return res
 
 # Preflight Claude's global merge before any writes (including pending env keys).
@@ -369,27 +383,25 @@ if not noverify:
     try:
         # with ~/.agent-keys loaded, as run-agent.sh does
         r = subprocess.run(["bash", "-c", '[ -f "$HOME/.agent-keys" ] && . "$HOME/.agent-keys"; ' + cmd], capture_output=True, text=True, timeout=60)
-        txt = (r.stdout + r.stderr).strip().splitlines()
-        if cli == "pi": txt = [f"{len(txt)} lines of models listed"] if r.returncode == 0 else txt[-3:]
-        out["verify"] = {"cmd": cmd, "rc": r.returncode, "out": [l[:160] for l in txt[:8]]}
-    except Exception as e:
-        out["verify"] = {"cmd": cmd, "rc": None, "out": [str(e)[:200]]}
+        out["verify"] = {"cmd": cmd, "rc": r.returncode, "out": [], "note": "CLI output suppressed (may contain credentials)"}
+    except Exception:
+        out["verify"] = {"cmd": cmd, "rc": None, "out": [], "note": "status check failed or timed out"}
 
-out["parity"] = parity_check.check(cli)
+out["parity"] = parity_check.check(cli, no_run=noverify)
 if not out["parity"]["ok"]:
     warnings.append("parity check found breaking gaps: " + "; ".join(f"{g['item']}: {g['detail']}" for g in out["parity"]["gaps"] + out["parity"].get("auth", []) if g["impact"] == "breaking")[:400])
 
 # central config
 cfg = os.path.join(here, "..", "..", "configure-agents", "scripts", "agents_config.py")
-verified = noverify or (out.get("verify") or {}).get("rc") == 0
+verified = not noverify and (out.get("verify") or {}).get("rc") == 0
 if any(i.get("kind") == "auth" for i in out["installed"]) and not verified:
-    out["config"] = "unchanged: the status check failed, so fix the login first (files are installed; backups listed)"
+    out["config"] = "unchanged: status check skipped or failed (files are installed; verify the login before enabling)"
 elif any(i.get("kind") == "auth" for i in out["installed"]):
     r1 = subprocess.run([sys.executable, cfg, "enable", cli], capture_output=True, text=True)
     # follow the imported native model/reasoning: "native" = the runner passes no --model / reasoning flag
     r2 = subprocess.run([sys.executable, cfg, "set", f"agents.{cli}.auth", "imported",
                          f"agents.{cli}.model", "native", f"agents.{cli}.reasoning", "native"], capture_output=True, text=True)
-    out["config"] = "enabled, auth=imported, model/reasoning=native" if r1.returncode == 0 and r2.returncode == 0 else ("config update failed: " + (r1.stdout + r1.stderr + r2.stdout + r2.stderr).strip()[-300:])
+    out["config"] = "enabled, auth=imported, model/reasoning=native" if r1.returncode == 0 and r2.returncode == 0 else "config update failed (output suppressed)"
 else:
     out["config"] = "unchanged (no auth file imported)"
 

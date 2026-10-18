@@ -45,7 +45,10 @@ ver() { # first line of `<cli> --version`, killed after ~10 s
   p=$!; i=0
   while kill -0 "$p" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
   kill "$p" 2>/dev/null
-  head -n 1 "$t" | cut -c1-80; rm -f "$t"
+  # A CLI may print credentials in diagnostics: retain only a numeric version.
+  wait "$p" 2>/dev/null; rc=$?
+  if [ "$rc" = 0 ]; then head -n 1 "$t" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1; fi
+  rm -f "$t"
 }
 
 tmo() { # run "$@" with stdout to file $TMO_OUT, killed after ~10 s
@@ -253,12 +256,12 @@ var WELL_KNOWN = {
         "OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN"]
 };
 function run(argv) {
-  // argv: <home> <codex dir> <claude dir> <pi dir> <omp dir> <clis...>
-  var home = argv[0], dirs = { codex: argv[1], claude: argv[2], pi: argv[3], omp: argv[4] }, clis = argv.slice(5), stores = {}, names = {};
+  // argv: <home> <codex dir> <claude dir> <pi dir> <omp dir> <claude global dir> <clis...>
+  var dirs = { codex: argv[1], claude: argv[2], pi: argv[3], omp: argv[4] }, clis = argv.slice(6), stores = {}, names = {};
   clis.forEach(function (c) {
     try {
       if (c === "codex") stores = codex(dirs.codex) || {};
-      else if (c === "claude") claude(dirs.claude, home);
+      else if (c === "claude") claude(dirs.claude, argv[5]);
       else if (c === "pi") pi(dirs.pi);
       else if (c === "omp") omp(dirs.omp);
       (WELL_KNOWN[c] || []).forEach(function (n) { names[n] = 1; });
@@ -272,9 +275,9 @@ if (typeof require === "function") console.log(run(process.argv.slice(2)));
 SCANJS
   cdir="${CODEX_HOME:-$HOME/.codex}"; ldir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; pdir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
   # shellcheck disable=SC2086
-  if command -v node >/dev/null 2>&1; then echo 'SCANNER node'; node "$SEC/scan.js" "$HOME" "$cdir" "$ldir" "$pdir" "$HOME/.omp/agent" $clis </dev/null 2>/dev/null
-  elif command -v bun >/dev/null 2>&1; then echo 'SCANNER bun'; bun "$SEC/scan.js" "$HOME" "$cdir" "$ldir" "$pdir" "$HOME/.omp/agent" $clis </dev/null 2>/dev/null
-  elif [ "$os" = macos ]; then echo 'SCANNER jxa'; osascript -l JavaScript "$SEC/scan.js" "$HOME" "$cdir" "$ldir" "$pdir" "$HOME/.omp/agent" $clis </dev/null 2>/dev/null
+  if command -v node >/dev/null 2>&1; then echo 'SCANNER node'; node "$SEC/scan.js" "$HOME" "$cdir" "$ldir" "$pdir" "$HOME/.omp/agent" "${CLAUDE_CONFIG_DIR:-$HOME}" $clis </dev/null 2>/dev/null
+  elif command -v bun >/dev/null 2>&1; then echo 'SCANNER bun'; bun "$SEC/scan.js" "$HOME" "$cdir" "$ldir" "$pdir" "$HOME/.omp/agent" "${CLAUDE_CONFIG_DIR:-$HOME}" $clis </dev/null 2>/dev/null
+  elif [ "$os" = macos ]; then echo 'SCANNER jxa'; osascript -l JavaScript "$SEC/scan.js" "$HOME" "$cdir" "$ldir" "$pdir" "$HOME/.omp/agent" "${CLAUDE_CONFIG_DIR:-$HOME}" $clis </dev/null 2>/dev/null
   fi
 }
 env_set() { # <names...>: "NAME process" / "NAME login_shell" lines; values are never printed
@@ -326,7 +329,7 @@ for c in "$@"; do
     codex) [ -f "$d/auth.json" ] && lstore="file"
            if [ "$lstore" = none ] && [ "$(store_present 'Codex Auth')" = 1 ]; then lstore=keyring
              note="login is in the OS credential store (Codex Auth): default is codex login --device-auth on the box; copying it is opt-in (export_secrets.sh keychain:codex)"; fi ;;
-    claude) [ -f "$HOME/.claude.json" ] && add "../.claude.json"
+    claude) [ -f "${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json" ] && add "../.claude.json"
             [ -f "$d/.credentials.json" ] && lstore="file"
             if [ "$os" = macos ] && [ "$lstore" = none ]; then
               # Existence check only (no -w/-g: the secret is never read).
@@ -348,7 +351,9 @@ for c in "$@"; do
         note="${note}${note:+; }omp login for $pr is disabled on this computer: run omp, then /login there first"; fi
       astat="$astat${astat:+,}\"$(esc "$pr")\":\"$st\""
     done
-    if command -v sqlite3 >/dev/null 2>&1 && [ -z "$rows" ]; then
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+      note="${note}${note:+; }sqlite3 not found: omp login status unknown"
+    elif [ -z "$rows" ]; then
       note="${note}${note:+; }omp has no saved login on this computer (or agent.db could not be read)"
     elif [ -n "$rows" ] && [ -z "$good" ]; then imp=0; fi
   fi

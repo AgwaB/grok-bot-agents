@@ -153,13 +153,13 @@ def sh(cmd, timeout=600, cwd=None, env=None):
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd, env=env,
                            shell=isinstance(cmd, str), stdin=subprocess.DEVNULL)
         return r.returncode, (r.stdout or "") + (r.stderr or "")
-    except Exception as e:  # timeout, missing binary
-        return None, str(e)
+    except Exception:  # timeout, missing binary; exceptions can contain secret-bearing argv
+        return None, ""
 
 
 def last_line(text):
-    lines = [l for l in text.strip().splitlines() if l.strip()]
-    return lines[-1][:200] if lines else ""
+    # Helper diagnostics can echo credentials. Never forward even a truncated line.
+    return "output suppressed" if text else ""
 
 
 def read_manifest(stage_root):
@@ -186,9 +186,10 @@ def check_version(cli, man, warnings):
     src = man["version"].get(cli)
     if not src or not shutil.which(cli): return None
     _, out = sh([cli, "--version"], timeout=30)
-    box = (out.strip().splitlines() or [""])[0][:80]
-    a, b = vtuple(src), vtuple(box)
-    res = {"computer": src, "box": box}
+    a, b = vtuple(src), vtuple(out)
+    src = ".".join(map(str, a)) if a else "unknown"
+    box = ".".join(map(str, b)) if b else "unknown"
+    res: dict[str, object] = {"computer": src, "box": box}
     if a and b and b < a:
         warnings.append(f"{cli} on the box ({box}) is older than on the computer ({src}); newer settings or plugins may "
                         f"not load. Update it on the box (setup-agents install step, pinned to that version).")
@@ -366,7 +367,7 @@ def claude_post(stage, dest_root, man, warnings):
     for p in enabled:
         me, be = (mac.get(p) or [{}])[0], (inst.get(p) or [None])[0]
         sha = me.get("gitCommitSha")
-        if not be or not sha or be.get("gitCommitSha") == sha: continue
+        if not be or not isinstance(sha, str) or not sha or be.get("gitCommitSha") == sha: continue
         plugin, mkt = p.split("@", 1)
         loc = (known.get(mkt) or {}).get("installLocation")
         if not loc or not os.path.isdir(os.path.join(loc, ".git")):
@@ -382,7 +383,8 @@ def claude_post(stage, dest_root, man, warnings):
         if not isinstance(source, str) or not source.startswith("./"):
             warnings.append(f"{p}: plugin source isn't inside the marketplace repo; kept {be.get('version')} (computer: {me.get('version')})"); continue
         sub = os.path.normpath(source[2:]) if source not in ("./", ".") else ""
-        ver = me.get("version") if me.get("version") not in (None, "unknown") else sha[:12]
+        version = me.get("version")
+        ver = version if isinstance(version, str) and version != "unknown" else sha[:12]
         dest = os.path.join(pdir, "cache", mkt, plugin, ver)
         if not os.path.isdir(dest):
             os.makedirs(dest, exist_ok=True)
@@ -393,8 +395,7 @@ def claude_post(stage, dest_root, man, warnings):
         be.update(version=ver, gitCommitSha=sha, installPath=dest); changed = True
         pinned.append({"plugin": p, "version": ver, "sha": sha[:12]})
     if changed:
-        f = os.path.join(pdir, "installed_plugins.json"); tmp = f + ".tmp"
-        json.dump(data, open(tmp, "w", encoding="utf-8"), indent=2); os.replace(tmp, f)
+        atomic_write(os.path.join(pdir, "installed_plugins.json"), json.dumps(data, indent=2).encode("utf-8"))
     if pinned: res["plugins_pinned"] = pinned
     # hook / statusLine commands whose absolute tool path is missing: use the box's copy of that tool
     fixes = []
@@ -412,7 +413,7 @@ def claude_post(stage, dest_root, man, warnings):
             for h in (g or {}).get("hooks") or []:
                 if isinstance(h, dict) and h.get("command"): h["command"] = fix(h["command"])
     if fixes:
-        tmp = sp + ".tmp"; json.dump(settings, open(tmp, "w", encoding="utf-8"), indent=2); os.chmod(tmp, 0o600); os.replace(tmp, sp)
+        atomic_write(sp, json.dumps(settings, indent=2).encode("utf-8"))
         res["tool_paths_fixed"] = fixes
     try: cj = json.load(open(claude_global(HOME), encoding="utf-8"))
     except Exception: cj = {}
@@ -430,8 +431,8 @@ def codex_post(stage, dest_root, man, warnings):
     try:
         import tomllib
         cfg = tomllib.load(open(p, "rb"))
-    except Exception as e:
-        warnings.append(f"config.toml not parsed ({str(e)[:80]}): MCP checks skipped"); return res
+    except Exception:
+        warnings.append("config.toml not parsed: MCP checks skipped (details suppressed)"); return res
     text = open(p, encoding="utf-8").read(); orig = text
     disabled, miss = [], []
     for name, s in (cfg.get("mcp_servers") or {}).items():
@@ -458,7 +459,7 @@ def codex_post(stage, dest_root, man, warnings):
         if new != text: text = new; res["notify_disabled"] = True
         else: warnings.append(f"codex notify points at a missing program ({n[0]}); comment it out in config.toml")
     if text != orig:
-        tmp = p + ".tmp"; open(tmp, "w", encoding="utf-8").write(text); os.chmod(tmp, 0o600); os.replace(tmp, p)
+        atomic_write(p, text.encode("utf-8"))
     if disabled:
         res["mcp_disabled"] = disabled
         warnings.append(f"codex MCP servers disabled on the box (their program exists only on the other computer): {disabled}")
@@ -481,7 +482,7 @@ def run(cli, stage, dest_root, warnings):
           "codex": lambda: codex_post(stage, dest_root, man, warnings), "omp": lambda: omp_post(stage, dest_root, man, warnings)}[cli]
     try: res = fn()
     except Exception as e:
-        warnings.append(f"post-install steps for {cli} stopped: {type(e).__name__}: {str(e)[:160]}"); res = {}
+        warnings.append(f"post-install steps for {cli} stopped: {type(e).__name__} (details suppressed)"); res = {}
     v = check_version(cli, man, warnings)
     if v: res["version"] = v
     return res

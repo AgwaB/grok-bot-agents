@@ -65,7 +65,13 @@ class ImportMatrix(unittest.TestCase):
         p.chmod(0o700)
         return p
 
-    def call(self, script, *args, rc=0, extra=None, prefix=""):
+    def hide(self, *names):
+        # dash cannot call its own `command` builtin from a same-named function.
+        # Delegate the non-hidden lookups to a clean POSIX shell instead.
+        return ('command() { case "$*" in ' + '|'.join('"-v ' + n + '"' for n in names)
+                + ') return 1;; esac; /bin/sh -c \'command "$@"\' sh "$@"; }\n')
+
+    def call(self, script, *args, rc: int | tuple[int, ...] = 0, extra=None, prefix=""):
         env = dict(self.env, **(extra or {}))
         cmd = (["/bin/sh", "-s", "--"] if script.endswith(".sh") and script != "apply_import.sh"
                else ["/bin/bash", str(S / script)] if script.endswith(".sh")
@@ -432,7 +438,7 @@ class ImportMatrix(unittest.TestCase):
 
     def test_missing_sqlite(self):
         self.db(".omp/agent/agent.db", [("provider", None)])
-        prefix = 'command() { if [ "$*" = "-v sqlite3" ]; then return 1; fi; command command "$@"; }\n'
+        prefix = self.hide("sqlite3")
         d = self.detect("omp", prefix=prefix)["clis"]["omp"]
         self.assertEqual(d["auth_status"], {})
         self.assertIn("sqlite3", d["note"])
@@ -448,8 +454,10 @@ class ImportMatrix(unittest.TestCase):
         self.assertIn(".codex/skills/linked/SKILL.md", names)
         self.assertFalse(any("dangling" in n for n in names))
         self.call("stage_tar.py", self.home / "agent-import.tgz")
-        self.apply("codex")
-        self.assertEqual((self.home / ".codex/skills/linked/SKILL.md").read_text(), "skill")
+        box = self.root / "box"
+        box.mkdir()
+        self.apply("codex", extra={"HOME": str(box)})
+        self.assertEqual((box / ".codex/skills/linked/SKILL.md").read_text(), "skill")
 
     def test_tar_safety(self):
         entries = [(".codex/AGENTS.md", "safe", tarfile.REGTYPE)]
@@ -487,3 +495,240 @@ class ImportMatrix(unittest.TestCase):
         self.put("pi/_home/.ssh/id_rsa", self.canary, self.stage)
         self.apply("pi")
         self.assertFalse((self.home / ".ssh").exists())
+
+    def test_overrides(self):
+        codex, claude = self.home / "custom codex", self.home / "custom claude"
+        env = {"CODEX_HOME": str(codex), "CLAUDE_CONFIG_DIR": str(claude)}
+        self.js("auth.json", {"OPENAI_API_KEY": self.canary}, codex)
+        self.js("settings.json", {}, claude)
+        self.js(".claude.json", {"mcpServers": {"relocated": {"url": "https://example.invalid"}}}, claude)
+        d = self.detect("codex", "claude", extra=env)
+        self.assertTrue(d["clis"]["codex"]["has_auth"])
+        self.assertTrue(any("relocated" in x["where"] for x in d["secrets"]["inventory"]["items"]))
+        for cli in ("codex", "claude"):
+            self.call("bundle_local.sh", cli, extra=env, rc=2)
+        self.stub("secret-tool", 'printf \'{"token":"%s"}\\n\' "$CANARY"\n')
+        self.assertEqual(self.call("export_secrets.sh", "keychain:codex", extra=env)["items"][0]["status"], "ok")
+        self.put("codex/AGENTS.md", "instructions", self.stage)
+        self.js("claude/_home/.claude.json", {"mcpServers": {"new": {"url": "https://example.invalid"}}}, self.stage)
+        self.apply("codex", extra=env)
+        self.apply("claude", extra=env)
+        self.assertTrue((codex / "AGENTS.md").is_file())
+        self.assertIn("new", json.loads((claude / ".claude.json").read_text())["mcpServers"])
+        self.assertFalse((self.home / ".claude.json").exists())
+        p = self.call("parity_check.py", "--cli", "claude", "--no-run", extra=env, rc=(0, 1))
+        self.assertTrue(any("relocated" in g["item"] for g in p["claude"]["auth"]))
+
+    def test_pi_override(self):
+        dest = self.home / "custom pi"
+        env = {"PI_CODING_AGENT_DIR": str(dest)}
+        self.js("auth.json", {"sample": {"key": "!op read vault"}}, dest)
+        self.stub("op", 'printf "%s" "$CANARY"\n')
+        self.assertTrue(self.detect("pi", extra=env)["clis"]["pi"]["has_auth"])
+        self.assertEqual(self.call("export_secrets.sh", "resolve:pi:auth.json:sample=TEST_KEY", extra=env)["items"][0]["status"], "ok")
+        self.call("bundle_local.sh", "pi", extra=env, rc=2)
+        self.put("pi/AGENTS.md", "override", self.stage)
+        self.apply("pi", extra=env)
+        self.assertEqual((dest / "AGENTS.md").read_text(), "override")
+        self.assertFalse((self.home / ".pi").exists())
+        self.js("auth.json", {"sample": {"key": "UNSET_KEY"}}, dest)
+        p = self.call("parity_check.py", "--cli", "pi", "--no-run", extra=env)
+        self.assertIn("UNSET_KEY", json.dumps(p))
+
+    def test_windows_paths(self):
+        source = 'C:\\Users\\Zoë Smith'
+        d = self.call("import_plan.py", "--os", "windows", "--home", source, "--cli", "codex", "--json")
+        self.assertIn(source + '\\.codex\\config.toml', json.dumps(d, ensure_ascii=False).replace('\\\\', '\\'))
+        self.js("pi/settings.json", {"cwd": source + '\\work', "forward": source.replace('\\', '/') + '/work'}, self.stage)
+        self.apply("pi", "--src-home", source)
+        data = json.loads((self.home / ".pi/agent/settings.json").read_text())
+        self.assertTrue(all(v.startswith(str(self.home)) for v in data.values()))
+
+    def test_quoted_home(self):
+        box = self.root / 'Zoë \'quoted\' "double"'
+        box.mkdir()
+        self.js("pi/settings.json", {"cwd": "/Users/source/work"}, self.stage)
+        self.apply("pi", "--src-home", "/Users/source", extra={"HOME": str(box)})
+        self.assertEqual(json.loads((box / ".pi/agent/settings.json").read_text())["cwd"], str(box) + "/work")
+
+    def test_scanner_fallbacks(self):
+        self.js(".pi/agent/auth.json", {"sample": {"key": self.canary}})
+        d = self.detect("pi", prefix=self.hide("node", "bun"))
+        self.assertEqual(d["secrets"]["scanner"], "none")
+        self.assertTrue(d["clis"]["pi"]["has_auth"])
+        self.stub("bun", 'exec "$MATRIX_NODE" "$@"\n')
+        d = self.detect("pi", prefix=self.hide("node"), extra={"MATRIX_NODE": NODE})
+        self.assertEqual(d["secrets"]["scanner"], "bun")
+        self.assertTrue(d["secrets"]["inventory"]["items"])
+        self.stub("uname", "echo Darwin\n")
+        # Dispatch-only JXA emulation: native Foundation is deliberately not claimed.
+        self.stub("osascript", 'shift 2; exec "$MATRIX_NODE" "$@"\n')
+        d = self.detect("pi", prefix=self.hide("node", "bun"), extra={"MATRIX_NODE": NODE})
+        self.assertEqual(d["secrets"]["scanner"], "jxa")
+        self.stub("op", 'printf "%s" "$CANARY"\n')
+        self.js(".pi/agent/auth.json", {"sample": {"key": "op://vault/key"}})
+        d = self.call("export_secrets.sh", "resolve:pi:auth.json:sample=TEST_KEY",
+                      prefix=self.hide("node", "bun"), extra={"MATRIX_NODE": NODE})
+        self.assertEqual(d["items"][0]["status"], "ok")
+
+    def test_version_output(self):
+        import time
+        self.stub("pi", 'echo "fixture 1.2.3 $CANARY"\n')
+        self.assertEqual(self.detect("pi")["clis"]["pi"]["version"], "1.2.3")
+        self.stub("pi", 'echo "diagnostic $CANARY" >&2; exit 1\n')
+        self.assertEqual(self.detect("pi")["clis"]["pi"]["version"], "")
+        self.stub("pi", 'exec sleep 30\n')
+        start = time.monotonic()
+        self.assertEqual(self.detect("pi")["clis"]["pi"]["version"], "")
+        self.assertLess(time.monotonic() - start, 15)
+
+    def test_bundle_skip(self):
+        self.js(".pi/agent/auth.json", {"sample": {"key": self.canary}})
+        self.put(".pi/agent/skills/space name/SKILL.md", "omit")
+        self.put(".pi/agent/AGENTS.md", "keep")
+        _, names = self.bundle("--skip", ".pi/agent/auth.json", "--skip", ".pi/agent/skills/space name/", "pi")
+        self.assertNotIn(".pi/agent/auth.json", names)
+        self.assertNotIn(".pi/agent/skills/space name/SKILL.md", names)
+        self.assertIn(".pi/agent/AGENTS.md", names)
+
+    def test_apply_filters(self):
+        self.put("codex/skills/ok/SKILL.md", "keep", self.stage)
+        for rel in ("sessions/log", "skills/._dir/file", "skills/.DS_Store", "skills/x.pyc", "skills/__pycache__/x"):
+            self.put("codex/" + rel, "omit", self.stage)
+        outside = self.put("outside", self.canary)
+        (self.stage / "codex/skills/link").symlink_to(outside)
+        os.mkfifo(self.stage / "codex/skills/pipe")
+        self.apply("codex")
+        dest = self.home / ".codex"
+        self.assertEqual([p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file()], ["skills/ok/SKILL.md"])
+        self.assertTrue(outside.read_text() == self.canary)
+
+    def test_large_binary(self):
+        binary = b'\xff\x00\xfe' + self.canary.encode()
+        self.put("pi/skills/binary/data.bin", binary, self.stage)
+        big = self.put("pi/skills/huge", b"", self.stage)
+        with big.open("wb") as f:
+            f.truncate(201 * 1024 * 1024)
+        self.apply("pi")
+        self.assertTrue((self.home / ".pi/agent/skills/binary/data.bin").read_bytes() == binary)
+        self.assertFalse((self.home / ".pi/agent/skills/huge").exists())
+        # Sparse tar: oversized payload is skipped without reading/allocating it.
+        p = self.root / "large.tar"
+        size = 201 * 1024 * 1024
+        m = tarfile.TarInfo(".pi/agent/skills/huge")
+        m.size = size
+        with p.open("wb") as f:
+            f.write(m.tobuf())
+            f.seek(size, 1)
+            f.write(b"\0" * 1024)
+        d = self.call("stage_tar.py", p)
+        self.assertEqual(d["skipped"]["too large"], 1)
+        self.assertFalse((self.stage / "pi/skills/huge").exists())
+
+    def test_package_bundle(self):
+        package = self.home / "projects/local package"
+        self.js("package.json", {"name": "fixture", "version": "1.0.0"}, package)
+        self.put("index.js", "// source", package)
+        for rel in ("node_modules/x/file", ".venv/lib/x", ".git/config"):
+            self.put(rel, "omit", package)
+        self.js(".pi/agent/settings.json", {"packages": [str(package)]})
+        _, names = self.bundle("pi")
+        self.assertIn("projects/local package/index.js", names)
+        self.assertFalse(any("node_modules" in p or ".venv" in p or ".git" in p for p in names))
+        self.call("stage_tar.py", self.home / "agent-import.tgz")
+        box = self.root / "box"
+        box.mkdir()
+        self.apply("pi", "--src-home", str(self.home), extra={"HOME": str(box)})
+        self.assertEqual((box / "projects/local package/index.js").read_text(), "// source")
+
+    def test_forbidden_links(self):
+        self.put(".codex/AGENTS.md", "keep")
+        for i, rel in enumerate((".ssh/id_rsa", ".aws/credentials", ".gnupg/private", ".config/gcloud/key",
+                                 ".mozilla/profile/cookies", "Library/Keychains/login", "AppData/Local/Chrome/Cookies",
+                                 ".agent-keys", ".claude/.credentials.json")):
+            p = self.put(rel, self.canary)
+            link = self.home / (".codex/skills/leak" + str(i))
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(p)
+        self.put("external", self.canary, self.root)
+        (self.home / ".codex/skills/outside").symlink_to(self.root / "external")
+        _, names = self.bundle("codex")
+        self.assertFalse(any("skills/" in n for n in names))
+
+    def test_bundle_failure(self):
+        self.put(".codex/AGENTS.md", "keep")
+        self.put(".agent-import-secrets/secrets.env", "export TEST_KEY='" + self.canary + "'\n")
+        self.stub("tar", 'printf "%s" "$CANARY" > "$2"; echo "$CANARY" >&2; exit 2\n')
+        d = self.call("bundle_local.sh", "codex", rc=1)
+        self.assertFalse(d["ok"])
+        self.assertFalse((self.home / "agent-import.tgz").exists())
+        self.assertTrue((self.home / ".agent-import-secrets/secrets.env").is_file())
+
+    def test_diagnostics(self):
+        self.stub("npm", 'echo "$CANARY" >&2; exit 1\n')
+        self.js("pi/extensions/sample/package.json", {"dependencies": {"fixture": "1.0.0"}}, self.stage)
+        d = self.apply("pi")
+        self.assertFalse(d["deps_installed"][0]["ok"])
+        self.put("codex/config.toml", 'model = "unterminated ' + self.canary, self.stage)
+        self.apply("codex")
+        # No parser exception payload, even when the invalid value is itself a key.
+        self.js("claude/settings.json", {"enabledPlugins": {"sample": True}, "extraKnownMarketplaces": []}, self.stage)
+        self.stub("claude", 'echo "$CANARY"; exit 1\n')
+        self.apply("claude")
+        self.js(".pi/agent/settings.json", {"packages": []})
+        self.stub("pi", 'echo "Error: $CANARY" >&2; exit 1\n')
+        p = self.call("parity_check.py", "--cli", "pi", rc=1)
+        self.assertFalse(p["pi"]["ok"])
+
+    def test_verify_status(self):
+        for rc in (7, 0):
+            with self.subTest(rc=rc):
+                box = self.root / ("verify-" + str(rc))
+                box.mkdir()
+                self.js("codex/auth.json", {"OPENAI_API_KEY": self.canary}, self.stage)
+                self.stub("codex", 'echo "$CANARY"; echo "$CANARY" >&2; exit ' + str(rc) + '\n')
+                d = self.call("apply_import.sh", "codex", extra={"HOME": str(box)})
+                self.assertEqual(d["verify"]["rc"], rc)
+                config = box / ".grok-bot-agents/config.json"
+                self.assertEqual(config.exists(), rc == 0)
+                if rc == 0:
+                    self.assertEqual(json.loads(config.read_text())["agents"]["codex"]["auth"], "imported")
+        box = self.root / "no-verify"
+        box.mkdir()
+        self.js("codex/auth.json", {"OPENAI_API_KEY": self.canary}, self.stage)
+        self.apply("codex", extra={"HOME": str(box)})
+        self.assertFalse((box / ".grok-bot-agents/config.json").exists())
+
+    def test_parity_no_run(self):
+        self.stub("pi", 'echo called >> "$HOME/cli-calls"; echo "$CANARY"; exit 1\n')
+        self.js(".pi/agent/settings.json", {"packages": ["~/local", "npm:fixture"]})
+        self.js("local/package.json", {"name": "fixture"})
+        p = self.call("parity_check.py", "--cli", "pi", "--no-run", rc=(0, 1))
+        self.assertFalse((self.home / "cli-calls").exists())
+        self.assertFalse(any(g["item"] == "pi package ~/local" for g in p["pi"]["gaps"]))
+        self.assertTrue(any("not checked" in g["detail"] for g in p["pi"]["gaps"]))
+
+    @unittest.skipUnless(PWSH, "pwsh unavailable; native Windows remains manual")
+    def test_powershell(self):
+        self.js(".pi/agent/auth.json", {"sample": {"type": "api_key", "key": self.canary}})
+        self.js(".claude/.credentials.json", {"claudeAiOauth": {"accessToken": self.canary}})
+        self.stub("pi", 'echo "1.2.3 $CANARY"\n')
+        script = S / "detect_local.ps1"
+        commands = [["-File", str(script), "-Clis", "pi,claude"],
+                    ["-Command", "& ([scriptblock]::Create([IO.File]::ReadAllText($env:DETECT_SCRIPT))) -Clis pi,claude"]]
+        for cmd in commands:
+            r = subprocess.run([str(PWSH), "-NoProfile", "-NonInteractive"] + cmd, capture_output=True,
+                               env=dict(self.env, DETECT_SCRIPT=str(script)), cwd=self.home, timeout=35)
+            self.assertFalse(self.canary.encode() in r.stdout + r.stderr, "secret leaked (suppressed)")
+            self.assertEqual(r.returncode, 0, "PowerShell failed (output suppressed)")
+            try:
+                d = json.loads(r.stdout)
+            except ValueError:
+                self.fail("PowerShell invalid JSON (output suppressed)")
+            self.assertEqual(d["os"], "windows")
+            self.assertEqual(d["clis"]["pi"]["version"], "1.2.3")
+            self.assertTrue(d["secrets"]["inventory"]["items"])
+
+
+if __name__ == "__main__":
+    unittest.main()

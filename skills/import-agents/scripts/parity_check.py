@@ -15,6 +15,7 @@ apiKeyHelper / auth.command references whose tool isn't on the box, remote MCP s
 expired (Pi) or disabled (omp) provider logins, and Anthropic subscription OAuth used by Pi/omp (ToS flag).
 """
 import argparse, json, os, re, shutil, subprocess
+from import_safety import claude_global
 
 HOME = os.path.expanduser("~")
 ABS = re.compile(r"(?<![\w.$}])(/(?:home|Users|opt|usr|Applications|Library)/[^\s'\";|&)]+)")
@@ -57,8 +58,8 @@ def codex():
     if not os.path.isfile(p): return g
     try:
         import tomllib; cfg = tomllib.load(open(p, "rb"))
-    except Exception as e:
-        return [{"item": "config.toml", "impact": "breaking", "detail": f"not valid TOML: {str(e)[:120]}"}]
+    except Exception:
+        return [{"item": "config.toml", "impact": "breaking", "detail": "not valid TOML (details suppressed)"}]
     g += mcp_gaps(cfg.get("mcp_servers"), "config.toml")
     n = cfg.get("notify")
     if isinstance(n, list) and n and not found(str(n[0])):
@@ -87,8 +88,8 @@ def claude():
         e = (inst.get(p) or [{}])[0]
         if not (e.get("installPath") and os.path.isdir(e["installPath"])):
             g.append({"item": f"plugin {p}", "impact": "degraded", "detail": "enabled but not installed on the box"})
-    cj = lj(os.path.join(HOME, ".claude.json")) or {}
-    g += mcp_gaps(cj.get("mcpServers"), "~/.claude.json")
+    cj = lj(claude_global(HOME)) or {}
+    g += mcp_gaps(cj.get("mcpServers"), ".claude.json")
     return g
 
 
@@ -98,14 +99,19 @@ def pi(no_run):
     if s is None: return g
     if not shutil.which("pi"):
         return [{"item": "pi", "impact": "breaking", "detail": "pi not on PATH"}]
-    rc, out, err = run(["pi", "list"])
+    out = ""
+    if not no_run:
+        _, out, _ = run(["pi", "list"])
     listed, cur = {}, None
     for line in out.splitlines():
         if line.startswith("    ") and cur: listed[cur] = line.strip()
         elif line.startswith("  "): cur = line.strip(); listed[cur] = None
     for e in s.get("packages") or []:
         spec = e if isinstance(e, str) else (e or {}).get("source") or (e or {}).get("path") or ""
-        path = listed.get(spec)
+        if no_run and spec.startswith(("npm:", "git:", "http:", "https:")):
+            g.append({"item": f"pi package {spec}", "impact": "degraded", "detail": "resolution not checked (--no-run)"})
+            continue
+        path = os.path.join(d, os.path.expanduser(spec)) if no_run else listed.get(spec)
         if not path or not os.path.isdir(path):
             g.append({"item": f"pi package {spec}", "impact": "breaking", "detail": "not installed / path missing"}); continue
         pj = lj(os.path.join(path, "package.json")) or {}
@@ -122,8 +128,8 @@ def pi(no_run):
         text = out + err
         for w in sorted(set(re.findall(r'No models match pattern "([^"]+)"', text))):
             g.append({"item": f"pi model {w}", "impact": "degraded", "detail": "in enabledModels but not registered"})
-        for m in re.findall(r"(?m)^(?:Error|Failed)[^\n]{0,200}", text)[:3]:
-            g.append({"item": "pi startup", "impact": "breaking", "detail": m})
+        if rc != 0 or re.search(r"(?m)^(?:Error|Failed)", text):
+            g.append({"item": "pi startup", "impact": "breaking", "detail": "model listing failed (output suppressed)"})
     return g
 
 
@@ -206,7 +212,7 @@ def auth_claude(names):
         t = tool_of(s["apiKeyHelper"])
         if t and not found(t): g.append({"item": "claude apiKeyHelper", "impact": "breaking", "detail": f"`{os.path.basename(t)}` isn't on the box"})
     mo = creds.get("mcpOAuth") or {}
-    cj = lj(os.path.join(HOME, ".claude.json")) or {}
+    cj = lj(claude_global(HOME)) or {}
     for name, sv in (cj.get("mcpServers") or {}).items():
         if not isinstance(sv, dict): continue
         for k in ("env", "headers"):
@@ -277,7 +283,7 @@ def auth_omp(names):
 def check(cli, no_run=False):
     f = {"codex": codex, "claude": claude, "pi": lambda: pi(no_run), "omp": omp}[cli]
     try: gaps = f()
-    except Exception as e: gaps = [{"item": "parity check", "impact": "degraded", "detail": f"check failed: {type(e).__name__}: {str(e)[:120]}"}]
+    except Exception as e: gaps = [{"item": "parity check", "impact": "degraded", "detail": f"check failed: {type(e).__name__} (details suppressed)"}]
     try: auth = {"codex": auth_codex, "claude": auth_claude, "pi": auth_pi, "omp": auth_omp}[cli](env_names())
     except Exception as e: auth = [{"item": "auth check", "impact": "degraded", "detail": f"check failed: {type(e).__name__}"}]
     return {"ok": not any(x["impact"] == "breaking" for x in gaps + auth), "gaps": gaps, "auth": auth}

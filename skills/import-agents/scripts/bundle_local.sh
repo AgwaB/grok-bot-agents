@@ -100,7 +100,10 @@ ver() { # first line of `<cli> --version`, killed after ~10 s
   p=$!; i=0
   while kill -0 "$p" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
   kill "$p" 2>/dev/null
-  head -n 1 "$t" | cut -c1-80; rm -f "$t"
+  # A CLI may print credentials in diagnostics: retain only a numeric version.
+  wait "$p" 2>/dev/null; rc=$?
+  if [ "$rc" = 0 ]; then head -n 1 "$t" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1; fi
+  rm -f "$t"
 }
 pi_packages() {
   s=.pi/agent/settings.json
@@ -118,7 +121,7 @@ pi_packages() {
       *) case "$src" in /*) p=$src ;; "~"/*) p="$HOME/${src#"~/"}" ;; *) p=".pi/agent/$src" ;; esac
          p=$(cd "$p" 2>/dev/null && pwd -P) || { echo "missing $src" >>"$man"; continue; }
          case "$p" in "$hp"/*) r=${p#"$hp"/} ;; *) echo "outside_home $src" >>"$man"; continue ;; esac
-         case "$r" in .pi/agent/packages/*|.pi/agent/packages) ;; .*|*/../*|*/..|../*) note "unsafe package root skipped"; continue ;; esac
+         case "$r" in .pi/agent/packages/*|.pi/agent/packages) ;; .*|Library|Library/*|AppData|AppData/*|*/../*|*/..) note "unsafe package root skipped"; continue ;; esac
          tree "$r"
          case "$r" in .pi/agent/*) ;; *) echo "home $r" >>"$man" ;; esac
          if [ -x "$r/.venv/bin/python" ]; then
@@ -174,7 +177,9 @@ safe_source() {
   done
   parent=$(cd "$(dirname "$p")" 2>/dev/null && pwd -P) || return 1
   p="$parent/$(basename "$p")"
-  case "$p" in "$hp"/.ssh/*|"$hp"/.gnupg/*|"$hp"/.aws/*|"$hp"/.config/*|"$hp"/.mozilla/*|"$hp"/Library/*|"$hp"/.netrc|"$hp"/.git-credentials) return 1 ;;
+  case "$p" in "$hp"/.agent-keys|"$hp"/.claude.json|"$hp"/.claude/.credentials.json|"$hp"/.claude/settings.json|"$hp"/.codex/auth.json|"$hp"/.codex/.credentials.json|"$hp"/.codex/config.toml|"$hp"/.pi/agent/*auth*.json|"$hp"/.pi/agent/*token*.json|"$hp"/.pi/agent/*credential*.json|"$hp"/.pi/agent/.env|"$hp"/.omp/agent/agent.db*)
+    [ "$p" = "$hp/$1" ] || return 1 ;; esac
+  case "$p" in "$hp"/.ssh/*|"$hp"/.gnupg/*|"$hp"/.aws/*|"$hp"/.azure/*|"$hp"/.kube/*|"$hp"/.config/*|"$hp"/.mozilla/*|"$hp"/Library/*|"$hp"/AppData/*|"$hp"/.netrc|"$hp"/.git-credentials) return 1 ;;
     "$hp"/*) [ -f "$p" ] ;; *) return 1 ;; esac
 }
 : >"$list.safe"
