@@ -136,7 +136,14 @@ Code reviews use `--review DIR`. No worktree: the agent runs read-only inside DI
 and untracked files) and points the agent at it. A fingerprint of DIR (HEAD, `git status`, file hashes)
 is taken before and after. If anything changed, the result is `status: error` and `review_unchanged: false`.
 Nothing is cleaned up automatically. Tell the user and show `git -C DIR status`.
-For runs over about 10 minutes, start in the background and check back.
+For anything longer than a quick check, run it in the background so you get a completion notice:
+- Start `run-agent.sh` itself as the background Shell command (`block_until_ms: 0`). Never wrap it in
+  `nohup ... &` or `setsid`; a detached process sends no notice, and the run looks lost.
+- Pass `--id <name>` so the run dir is easy to find, and note the run dir in your status.
+- Every time you wake (any background notice, a user message, a subagent result), first check open runs:
+  `ls -t /workspace/agent-runs | head` and read `meta.json` / `result.md` of any run that finished since.
+  A notice can arrive while you are busy with something else, so don't rely on it alone.
+- Don't add a separate `while kill -0 ...; sleep` waiter. If you lost track of a run, check its `meta.json`.
 
 ## 5. Report back
 
