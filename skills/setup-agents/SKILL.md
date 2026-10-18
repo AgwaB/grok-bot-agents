@@ -1,6 +1,6 @@
 ---
 name: setup-agents
-description: First-time setup of coding-agent CLIs (Claude Code, OpenAI Codex CLI, Pi, Oh My Pi/omp) on the Grok Bot box. Pick agents (multi-select), install only those, sign in with a subscription or an API key without exposing keys in chat, set default model and reasoning level, write the central config ~/.grok-agents/config.json, and verify each with a cheap OK run. Use when the user asks to install, connect, set up or log in to Codex, Claude Code, Pi, pi agent, oh-my-pi or omp, or says "connect Codex to my bot" or "install pi agent with DeepSeek".
+description: First-time setup of coding-agent CLIs (Claude Code, OpenAI Codex CLI, Pi, Oh My Pi/omp) on the Grok Bot box. Pick agents (multi-select), install only those, sign in with a subscription or an API key without exposing keys in chat, set default model and reasoning level, write the central config ~/.grok-bot-agents/config.json, and verify each with a cheap OK run. Use when the user asks to install, connect, set up or log in to Codex, Claude Code, Pi, pi agent, oh-my-pi or omp, or says "connect Codex to my bot" or "install pi agent with DeepSeek".
 ---
 
 # Set up agent CLIs on the box
@@ -12,7 +12,7 @@ Config helper (in the sibling skill, same plugin):
 `CFG="python3 ../configure-agents/scripts/agents_config.py"` (run from this skill's folder;
 `$CFG path` prints the config location).
 
-If `~/.grok-agents/config.json` already exists, show `$CFG show` and ask whether to add
+If `~/.grok-bot-agents/config.json` already exists, show `$CFG show` and ask whether to add
 agents or reconfigure. For changes to an existing setup, use `configure-agents`.
 
 ## 2-1 · Pick agents (multi-select card)

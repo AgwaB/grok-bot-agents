@@ -1,4 +1,4 @@
-# grok-agents (v0.1.0)
+# grok-bot-agents (v0.1.0)
 
 English: [README.md](README.md)
 
@@ -21,7 +21,7 @@ Grok Bot 박스(클라우드 컴퓨터)에서 **Claude Code · Codex CLI · Pi �
 ## 구조
 
 ```
-grok-agents-plugin/
+grok-bot-agents/
 ├── .cursor-plugin/plugin.json
 ├── assets/logo.svg, logo.png
 ├── docs/ux-flow.html, ux-flow.png
@@ -85,7 +85,7 @@ grok-agents-plugin/
 - **레포가 아니거나 비코딩 작업**: `/workspace/agent-runs/<run-id>/work`에서 실행하고, 입력은 `--input`으로 넘겨 읽기용 dir로 추가합니다.
 - 산출물은 run 폴더에 남고, 요약 JSON의 `artifacts`에 경로가 나옵니다.
 
-## 중앙 config: `~/.grok-agents/config.json`
+## 중앙 config: `~/.grok-bot-agents/config.json`
 
 모든 봇이 이 파일 하나를 함께 씁니다. 키 값은 저장하지 않고 env 이름(`key_env`)만 둡니다.
 
@@ -127,7 +127,7 @@ grok-agents-plugin/
 
 [TESTING.md](TESTING.md)를 보세요. 검사 방법과 end-to-end 결과를 정리했습니다.
 
-- 자동 라우팅: `route.py decide`가 규칙, config, rate limit 상태(`~/.grok-agents/state.json`)를 보고 고릅니다. 한도에 걸린 CLI는 리셋 시각까지 건너뜁니다.
+- 자동 라우팅: `route.py decide`가 규칙, config, rate limit 상태(`~/.grok-bot-agents/state.json`)를 보고 고릅니다. 한도에 걸린 CLI는 리셋 시각까지 건너뜁니다.
 - 리뷰: `run-agent.sh --review DIR`은 그 자리에서 읽기 전용으로 실행합니다. 실행 전후 fingerprint가 다르면 실패로 처리합니다.
 
 ## 배포

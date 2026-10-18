@@ -1,11 +1,11 @@
 ---
 name: configure-agents
-description: Show and change the agent setup in ~/.grok-agents/config.json, including enabled agents, default model, reasoning level, permission mode (full-auto or safe), routing preferences and timeout. Also rotates logins and API keys and edits each CLI's own config (Codex config.toml, Claude settings.json, Pi settings.json, omp config.yml/models.yml). Use when the user asks what's configured, or says "change pi's model", "claude reasoning to max", "switch to safe mode", "prefer codex", "rotate my DeepSeek key", "re-login Claude", or "disable omp".
+description: Show and change the agent setup in ~/.grok-bot-agents/config.json, including enabled agents, default model, reasoning level, permission mode (full-auto or safe), routing preferences and timeout. Also rotates logins and API keys and edits each CLI's own config (Codex config.toml, Claude settings.json, Pi settings.json, omp config.yml/models.yml). Use when the user asks what's configured, or says "change pi's model", "claude reasoning to max", "switch to safe mode", "prefer codex", "rotate my DeepSeek key", "re-login Claude", or "disable omp".
 ---
 
 # Configure agents
 
-All bots share one config: `~/.grok-agents/config.json`. `delegate-task` reads it on
+All bots share one config: `~/.grok-bot-agents/config.json`. `delegate-task` reads it on
 every run, so changes apply from the next run. No restart needed.
 
 ```bash

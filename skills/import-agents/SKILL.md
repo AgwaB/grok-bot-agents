@@ -1,6 +1,6 @@
 ---
 name: import-agents
-description: Import the user's existing Codex, Claude Code, Pi or omp setup, logins included, from their own registered computer into the Grok Bot box, so they don't have to log in to each CLI again. Copies only an allowlist of auth and config files with ListMachines and CopyToBox (each copy needs the user's approval), never shows secret contents, backs up anything it would overwrite, rewrites home paths, updates ~/.grok-agents/config.json and verifies each CLI. Use when the user says "import my codex/claude settings", "copy my login from my laptop", "use my local setup", or picks "import from my computer" during setup-agents.
+description: Import the user's existing Codex, Claude Code, Pi or omp setup, logins included, from their own registered computer into the Grok Bot box, so they don't have to log in to each CLI again. Copies only an allowlist of auth and config files with ListMachines and CopyToBox (each copy needs the user's approval), never shows secret contents, backs up anything it would overwrite, rewrites home paths, updates ~/.grok-bot-agents/config.json and verifies each CLI. Use when the user says "import my codex/claude settings", "copy my login from my laptop", "use my local setup", or picks "import from my computer" during setup-agents.
 ---
 
 # Import agent setups from the user's computer
@@ -45,7 +45,7 @@ The CLIs must already be installed on the box (`setup-agents` 2-1). Scripts live
 7. **Apply.** Rerun without `--dry-run` (add `--overwrite` only after the user agrees). The script sets files to 600 and the
    CLI dir to 700, makes backups, rewrites `<home>` to the box home in text config, merges only `mcpServers`
    from Claude's `~/.claude.json`, runs the status check, records `auth: imported` and model/reasoning `native` in
-   `~/.grok-agents/config.json` (only when the check passes), and deletes the staged copies.
+   `~/.grok-bot-agents/config.json` (only when the check passes), and deletes the staged copies.
 8. **Env-var API keys** aren't in these files (for example Pi or omp providers using `DEEPSEEK_API_KEY`). Ask which env
    names they use, then have the user enter values through the masked secret input, or Take over and use the
    `read -rsp` line from `setup-agents` 2-2, into `~/.agent-keys`. Never in chat.

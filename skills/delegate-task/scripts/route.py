@@ -7,12 +7,18 @@
   route.py state | route.py clear [AGENT]
 
 Prints JSON: {"decision": "self"|"delegate"|"none", "agent", "type", "reason", "heavy_because", "skipped": {...}}
-Availability = enabled in ~/.grok-agents/config.json, installed, and not rate-limited (state.json, until > now).
+Availability = enabled in ~/.grok-bot-agents/config.json, installed, and not rate-limited (state.json, until > now).
 """
 import argparse, datetime as dt, json, os, re, shutil, sys
 
-CFG = os.path.expanduser(os.environ.get("GROK_AGENTS_CONFIG", "~/.grok-agents/config.json"))
-STATE = os.environ.get("GROK_AGENTS_STATE") or os.path.join(os.path.dirname(CFG), "state.json")
+def _default_cfg():
+    for env in ("GROK_BOT_AGENTS_CONFIG", "GROK_AGENTS_CONFIG"):  # GROK_AGENTS_CONFIG: legacy name
+        if os.environ.get(env): return os.path.expanduser(os.environ[env])
+    new, old = os.path.expanduser("~/.grok-bot-agents/config.json"), os.path.expanduser("~/.grok-agents/config.json")
+    if not os.path.exists(new) and os.path.exists(old): return old  # legacy dir from before the rename
+    return new
+CFG = _default_cfg()
+STATE = os.environ.get("GROK_BOT_AGENTS_STATE") or os.environ.get("GROK_AGENTS_STATE") or os.path.join(os.path.dirname(CFG), "state.json")
 BINS = [os.path.expanduser("~/.local/bin"), os.path.expanduser("~/.bun/bin")]
 FRONTIER = ["claude", "codex"]
 UTC = dt.timezone.utc
@@ -68,7 +74,7 @@ HEAVY = [("files", 5, "touches ~5+ files or a whole folder"), ("input_kb", 50, "
 
 def decide(a):
     cfg = load(CFG, None)
-    if cfg is None: return {"decision": "self", "agent": None, "reason": "no ~/.grok-agents/config.json; offer setup-agents for heavy work"}
+    if cfg is None: return {"decision": "self", "agent": None, "reason": "no ~/.grok-bot-agents/config.json; offer setup-agents for heavy work"}
     st = load(STATE, {}); enabled = cfg.get("enabled", []); rt = cfg.get("routing", {})
     skipped = {}
     def avail(x):

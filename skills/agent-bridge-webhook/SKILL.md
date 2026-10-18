@@ -49,7 +49,7 @@ Routine fields:
 
 The webhook URL and its sender key are in the routine panel. The user copies them from there; the bot
 never sees the key and must not ask for it. On the caller machine they go in
-`~/.config/grok-agents/bridge.env` (template: `scripts/bridge.env.example`, `chmod 600`), never in a repo.
+`~/.config/grok-bot-agents/bridge.env` (template: `scripts/bridge.env.example`, `chmod 600`), never in a repo.
 
 ## Guided setup (default): the user only pastes two values
 
@@ -60,7 +60,7 @@ Don't ask the user to run commands, edit files or find panels.
 1. **Routine.** Create it (section 2). The user approves the card.
 2. **Caller machine.** `ListMachines` and pick the computer the user's message came from. CopyFromBox
    `send-task.sh` to `~/.local/bin/grok-send-task`, then on that machine run
-   `mkdir -p ~/.config/grok-agents && chmod 755 ~/.local/bin/grok-send-task`. If `~/.local/bin` isn't on PATH,
+   `mkdir -p ~/.config/grok-bot-agents && chmod 755 ~/.local/bin/grok-send-task`. If `~/.local/bin` isn't on PATH,
    use the full path in the next steps.
 3. **Already configured?** Run `grok-send-task --check` on that machine. If it prints `config ok`, skip to step 6.
 4. **Open the setup terminal for them.**
@@ -81,13 +81,13 @@ CI callers (GitHub Actions) can't be set up this way: tell the user which three 
 ## 3. Caller side
 
 `scripts/send-task.sh "task" [context-file]` posts one request and prints its `request_id`. It
-reads `~/.config/grok-agents/bridge.env` (override with `GROK_BRIDGE_CONF`), refuses the file unless
+reads `~/.config/grok-bot-agents/bridge.env` (override with `GROK_BRIDGE_CONF`), refuses the file unless
 it's mode 600, and passes the key in a header file so it doesn't appear in `ps`. Works on macOS and
 Linux, so it suits a local agent's own skill or command, or CI (with the variables as CI secrets).
 
 Install on the caller machine:
 ```bash
-mkdir -p ~/.config/grok-agents ~/.local/bin
+mkdir -p ~/.config/grok-bot-agents ~/.local/bin
 cp scripts/send-task.sh ~/.local/bin/grok-send-task && chmod 755 ~/.local/bin/grok-send-task
 grok-send-task --setup   # asks for the Webhook URL and the Authorization header (hidden), writes bridge.env (600), checks it
 ```

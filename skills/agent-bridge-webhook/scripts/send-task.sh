@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Sender for the LOCAL machine or CI: posts one task to the Grok Bot "Agent bridge" webhook routine.
-# Config (never commit it): ~/.config/grok-agents/bridge.env, mode 600, or the same variables in env.
+# Config (never commit it): ~/.config/grok-bot-agents/bridge.env (legacy ~/.config/grok-agents/bridge.env still read), mode 600, or the same variables in env.
 # Paste values straight from the routine panel; quotes and spaces are fine (the file is parsed, not sourced):
 #   GROKBOT_WEBHOOK_URL=...      Webhook URL
 #   GROKBOT_WEBHOOK_HEADER=...   either the whole "Authorization: Bearer ..." line, or just the header name
@@ -9,7 +9,10 @@
 #        send-task.sh --check                 -> validates the config without sending
 #        send-task.sh --setup                 -> asks for the URL and header (hidden), writes the config (600), checks it
 set -euo pipefail
-CONF="${GROK_BRIDGE_CONF:-$HOME/.config/grok-agents/bridge.env}"
+CONF="${GROK_BRIDGE_CONF:-$HOME/.config/grok-bot-agents/bridge.env}"
+if [ -z "${GROK_BRIDGE_CONF:-}" ] && [ ! -e "$CONF" ] && [ -e "$HOME/.config/grok-agents/bridge.env" ]; then
+  CONF="$HOME/.config/grok-agents/bridge.env"  # legacy path from before the rename
+fi
 if [ "${1:-}" = "--setup" ]; then
   echo "Paste the values from the Agent bridge routine panel."
   read -rp "Webhook URL: " s_url

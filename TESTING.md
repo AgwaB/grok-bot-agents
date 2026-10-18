@@ -15,7 +15,7 @@ python3 -m py_compile skills/*/scripts/*.py && find . -name __pycache__ -prune -
 
 | Area | How |
 |---|---|
-| Router | `ROUTE_NOW=… GROK_AGENTS_STATE=/tmp/s.json python3 skills/delegate-task/scripts/route.py decide …`: light → `self`; bulk → pi; long → omp; hard → claude; review of codex → claude. With claude marked limited: hard → codex, review of codex → pi, `--named claude` → `none`/`ask`. The limit expires at the reset time. pi disabled → omp. `fixed` mode is honored |
+| Router | `ROUTE_NOW=… GROK_BOT_AGENTS_STATE=/tmp/s.json python3 skills/delegate-task/scripts/route.py decide …`: light → `self`; bulk → pi; long → omp; hard → claude; review of codex → claude. With claude marked limited: hard → codex, review of codex → pi, `--named claude` → `none`/`ask`. The limit expires at the reset time. pi disabled → omp. `fixed` mode is honored |
 | Reset parsing | `mark-limited claude --message "…resets 11pm (Asia/Seoul)"`, `"reset at 10-21 01:00:00 UTC"`, `"retry-after-ms=…"`, unknown text → +1h |
 | Review guard | a stub agent that edits the reviewed dir → `status: error`, `review_unchanged: false`; a clean stub → `ok`/`true`; `review.diff` contains uncommitted changes |
 | Bridge | `GROK_BRIDGE_ROOT=$(mktemp -d)`: post with `send-task.sh` to a local HTTP listener (refuses a non-600 config, sends the key header), then `bridge.py intake` on the body. Check that bidi, zero-width and control chars are stripped, that a duplicate exits 3, and that `../x`, `.x`, a missing id and non-JSON are rejected. `reply.reply_command`/extra fields are ignored and only reported. `bridge.py reply` sanitizes ANSI/bidi, refuses an existing outbox file or a symlink source; files are 600 |
@@ -40,4 +40,4 @@ python3 -m py_compile skills/*/scripts/*.py && find . -name __pycache__ -prune -
 1. Type `/` in Grok Bot: the five skills are listed.
 2. "set up codex and pi": multi-select, sign-in choice, OK test.
 3. "have pi translate README to Korean", "analyze this log folder" (auto route), "review that branch".
-4. "set claude reasoning to max" → `~/.grok-agents/config.json` changes.
+4. "set claude reasoning to max" → `~/.grok-bot-agents/config.json` changes.

@@ -1,6 +1,6 @@
-<p align="center"><img src="assets/logo.png" width="96" alt="grok-agents logo"></p>
+<p align="center"><img src="assets/logo.png" width="96" alt="grok-bot-agents logo"></p>
 
-# grok-agents
+# grok-bot-agents
 
 A skills-only Grok Bot plugin that installs, signs in and drives **Claude Code, Codex CLI, Pi and
 omp (Oh My Pi)** on the Grok Bot box (the bot's cloud computer).
@@ -53,7 +53,7 @@ A task is heavy if **any** of these hold; otherwise the bot does it itself:
 | Review / second opinion | the frontier agent that didn't produce it | cheap agent, read-only |
 
 A named CLI always wins (or the bot asks if it's unavailable). When a run hits a subscription or rate
-limit, the runner records the reset time in `~/.grok-agents/state.json` and the router skips that CLI
+limit, the runner records the reset time in `~/.grok-bot-agents/state.json` and the router skips that CLI
 until then.
 
 ## Isolation
@@ -78,7 +78,7 @@ Push, merge, PR, deploy, publishing and sending messages always need your OK, ev
 Full-auto gives the agent unrestricted shell, network and login-session access on the box. Worktrees
 isolate files, not the system.
 
-## Config: `~/.grok-agents/config.json`
+## Config: `~/.grok-bot-agents/config.json`
 
 Shared by every bot on the box. Keys are never stored, only env var names (`key_env`).
 

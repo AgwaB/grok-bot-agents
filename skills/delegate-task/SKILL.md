@@ -1,6 +1,6 @@
 ---
 name: delegate-task
-description: Hand heavy work, coding or not, to the enabled CLI agents on the box (Claude Code, Codex, Pi, omp) and get a short summary plus artifact paths back. Light work the bot does itself. Covers code changes, reviews, research or analysis across repos and documents, data and file processing, bulk transforms, long drafts and translations, log analysis, and long or unattended jobs. If the user names a CLI ("codex한테 시켜"), use that one; otherwise route by cost and difficulty among enabled CLIs, using ~/.grok-agents/config.json for model, reasoning and permission. Use when the user says "have codex/claude/pi/omp do X", "delegate", "save my Grok Bot credits", or asks for anything that meets the heavy-work criteria below.
+description: Hand heavy work, coding or not, to the enabled CLI agents on the box (Claude Code, Codex, Pi, omp) and get a short summary plus artifact paths back. Light work the bot does itself. Covers code changes, reviews, research or analysis across repos and documents, data and file processing, bulk transforms, long drafts and translations, log analysis, and long or unattended jobs. If the user names a CLI ("codex한테 시켜"), use that one; otherwise route by cost and difficulty among enabled CLIs, using ~/.grok-bot-agents/config.json for model, reasoning and permission. Use when the user says "have codex/claude/pi/omp do X", "delegate", "save my Grok Bot credits", or asks for anything that meets the heavy-work criteria below.
 ---
 
 # Delegate a task
@@ -84,7 +84,7 @@ python3 scripts/route.py clear [AGENT]    # forget a limit early
 ```
 
 - `agent: self` means the task is light: do it yourself. `action: ask` means the named CLI is unavailable, or `routing.mode: ask`.
-- Rate limits live in `~/.grok-agents/state.json`. The runner records them automatically from the
+- Rate limits live in `~/.grok-bot-agents/state.json`. The runner records them automatically from the
   CLI's message ("resets 11pm (Asia/Seoul)", a UTC reset time or `retry-after`; otherwise one hour).
   Limited CLIs are skipped until then, so after a `rate_limited` result just run `decide` again.
 - A rate-limited repo run that changed nothing removes its own empty worktree and branch.

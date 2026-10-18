@@ -7,7 +7,7 @@
 # - An existing different file is a conflict: exits 4 unless --overwrite, which first backs it up to <file>.bak.<ts>.
 # - Rewrites the user's home prefix (--src-home) to the box $HOME in text config files; warns about other absolute paths.
 # - Claude: only the mcpServers key of ~/.claude.json is merged.
-# - Files 600, dirs 700. Runs the CLI's status check; if it passes, updates ~/.grok-agents/config.json
+# - Files 600, dirs 700. Runs the CLI's status check; if it passes, updates ~/.grok-bot-agents/config.json
 #   (enable, auth=imported, model/reasoning=native so the imported settings apply).
 # - Deletes the staged files for that CLI afterwards unless --keep-stage (they contain tokens).
 set -uo pipefail

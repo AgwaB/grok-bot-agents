@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Central config for grok-agents: ~/.grok-agents/config.json (override: $GROK_AGENTS_CONFIG).
+"""Central config for grok-bot-agents: ~/.grok-bot-agents/config.json (override: $GROK_BOT_AGENTS_CONFIG).
+Falls back to the legacy ~/.grok-agents/config.json / $GROK_AGENTS_CONFIG when the new one is absent.
 
 Commands:
   agents_config.py path
@@ -16,7 +17,13 @@ model / reasoning: null or "native" = pass no flag, so the CLI uses its own (or 
 import json, os, shutil, sys, tempfile
 
 AGENTS = ["claude", "codex", "pi", "omp"]
-PATH = os.path.expanduser(os.environ.get("GROK_AGENTS_CONFIG", "~/.grok-agents/config.json"))
+def _default_cfg():
+    for env in ("GROK_BOT_AGENTS_CONFIG", "GROK_AGENTS_CONFIG"):  # GROK_AGENTS_CONFIG: legacy name
+        if os.environ.get(env): return os.path.expanduser(os.environ[env])
+    new, old = os.path.expanduser("~/.grok-bot-agents/config.json"), os.path.expanduser("~/.grok-agents/config.json")
+    if not os.path.exists(new) and os.path.exists(old): return old  # legacy dir from before the rename
+    return new
+PATH = _default_cfg()
 REASONING = {
     "claude": ["low", "medium", "high", "xhigh", "max"],             # claude --effort (verified --help 2.1.197)
     "codex": ["minimal", "low", "medium", "high", "xhigh"],          # -c model_reasoning_effort (key verified via --strict-config; values model-dependent)

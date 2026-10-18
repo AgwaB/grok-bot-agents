@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run one coding-agent CLI headless, log everything to a run dir, print only a short JSON summary.
-# Defaults come from ~/.grok-agents/config.json ($GROK_AGENTS_CONFIG); args override them.
+# Defaults come from ~/.grok-bot-agents/config.json ($GROK_BOT_AGENTS_CONFIG; legacy ~/.grok-agents / $GROK_AGENTS_CONFIG); args override them.
 # Usage:
 #   run-agent.sh --agent codex|claude|pi|omp [--cwd DIR] [--input DIR ...] (--prompt-file FILE | --prompt TEXT)
 #                [--model M] [--reasoning LEVEL] [--permission full-auto|safe] [--read-only]
@@ -11,7 +11,10 @@
 set -uo pipefail
 
 REVIEW="" BASE="" INPUTS=() AGENT="" CWD="" PROMPT="" PROMPT_FILE="" MODEL="" REASONING="" PERM="" TIMEOUT="" RUN_ID="" READONLY=0 RESUME=""
-CONFIG="${GROK_AGENTS_CONFIG:-$HOME/.grok-agents/config.json}"
+CONFIG="${GROK_BOT_AGENTS_CONFIG:-${GROK_AGENTS_CONFIG:-$HOME/.grok-bot-agents/config.json}}"
+if [ -z "${GROK_BOT_AGENTS_CONFIG:-}${GROK_AGENTS_CONFIG:-}" ] && [ ! -e "$CONFIG" ] && [ -e "$HOME/.grok-agents/config.json" ]; then
+  CONFIG="$HOME/.grok-agents/config.json"  # legacy dir from before the rename
+fi
 # Bot shells often start without the user-level bin dirs, so add them (npm prefix ~/.local, bun ~/.bun).
 for d in "$HOME/.local/bin" "$HOME/.bun/bin" "$(npm config get prefix 2>/dev/null)/bin"; do
   [ -d "$d" ] && case ":$PATH:" in *":$d:"*) ;; *) PATH="$d:$PATH";; esac
