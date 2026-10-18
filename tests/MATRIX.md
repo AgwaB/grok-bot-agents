@@ -38,7 +38,7 @@ checks pass, native skips and remaining gaps are explicit, version stays 0.1.0.
 | D08 | `CODEX_HOME` override | Detection/export/apply use override; bundle refuses default-dir substitution | A `overrides` |
 | D09 | `CLAUDE_CONFIG_DIR` override, `.claude.json` inside it | Scanner, merge and parity use relocated global file | A `overrides` |
 | D10 | `PI_CODING_AGENT_DIR` override | Detect/export/apply/parity use Pi override; unsupported bundle refuses | A `pi_override` |
-| D11 | HOME and resource paths with spaces, Unicode, quotes | Valid JSON, intact files and paths throughout | A `quoted_home`, `linked_skills` |
+| D11 | HOME and resource paths with spaces, Unicode, quotes | Valid JSON, intact files and paths throughout | A `quoted_home`, `linked_skills`, `pi_venv`, `claude_plugins` |
 | D12 | Neither node nor bun, Linux | `scanner: none`, file detection still works | A `scanner_fallbacks` |
 | D13 | bun only | Same scanner contract as node | A `scanner_fallbacks` (bun dispatch stub) |
 | D14 | macOS neither node nor bun: JXA | Correct JXA selection; Foundation reads and export work | A `scanner_fallbacks` (dispatch); M native JXA |
@@ -83,8 +83,8 @@ checks pass, native skips and remaining gaps are explicit, version stays 0.1.0.
 | I07 | Valid symlinked skill and dangling link | Bundle dereferences valid link, excludes dangling; no source changes | A `linked_skills` |
 | I08 | Symlink/special file in per-file stage | Skip without copying or following | A `apply_filters` |
 | I09 | Archive absolute/traversal/symlink/hardlink/device members | Skip unsafe entries; no writes outside stage | A `tar_safety` |
-| I10 | Existing staging symlink (including metadata/secrets) | Refuse before following into another directory | A `stage_symlink` |
-| I11 | Destination symlink, dangling link, symlink parent/temp path | Refuse before writes to target; no follow-through | A `destination_symlink` |
+| I10 | Existing staging symlink (including metadata/secrets) | Refuse before following into another directory | A `stage_symlink`, `stage_aux_symlinks`, `apply_aux_symlinks` |
+| I11 | Destination symlink, dangling link, symlink parent/temp path | Refuse before writes to target; no follow-through | A `destination_symlink`, `overlay_symlinks`, `omp_sidecar_symlink`, `verify_existing_config` |
 | I12 | AppleDouble, .DS_Store, pyc and __pycache__ | Exclude in bundle/stage/apply, including nested metadata dirs | A `tar_safety`, `apply_filters` |
 | I13 | Huge (>200 MiB sparse) and binary files | Bound extraction/copy; binary bytes unchanged, no decode traceback | A `large_binary` |
 | I14 | Package manifest tries `.ssh`, `.aws`, browsers, absolute/parent paths | Reject roots; direct `_home/` stage cannot bypass consent/allowlist | A `manifest_roots` |
@@ -95,9 +95,9 @@ checks pass, native skips and remaining gaps are explicit, version stays 0.1.0.
 | I19 | Codex keyring/auto/ephemeral config | Pin only top-level credential stores to file, idempotently | A `codex_stores` |
 | I20 | Codex missing Mac MCP with `enabled = true` | Disable without duplicate TOML key; preserve unrelated servers | A `codex_mcp` |
 | I21 | `--keep-stage`, ordinary cleanup, staged key cleanup | Keep only when requested; keys removed after real merge | E; A `idempotent_apply`, `keys_idempotent` |
-| I22 | CLI verification failure vs success | Return code retained; no raw output; config recorded only after success | A `verify_status` |
+| I22 | CLI verification failure vs success | Return code retained; no raw output; config recorded only after success | A `verify_status`, `verify_existing_config`, `verify_identical_auth` |
 | I23 | `parity_check.py --no-run` | No CLI calls, including `pi list`; inspect files only | A `parity_no_run` |
-| I24 | Pi npm overlay/version mismatch, Claude plugin SHA and venv rebuild | Stub/offline validation before real installer use | G broader runtime-parity fixtures; no real installers in suite |
+| I24 | Pi npm overlay/version mismatch, Claude plugin SHA and venv rebuild | Stub/offline validation before real installer use | A `pi_overlay`, `pi_venv`, `claude_plugins`, `dependency_install`; M real installers/native plugin execution |
 | I25 | Package symlink points outside home or into forbidden home secrets | Do not bundle forbidden target, including via skills | A `forbidden_links`; G arbitrary external package trees require audit |
 | I26 | Tar creation fails or returns fatal rc after writing a partial archive | No success, keep consented exports for retry | A `bundle_failure` |
 | I27 | Simultaneous imports / concurrent client refresh | Avoid lost writes and live WAL races | M/G no locking/transaction protocol yet; stop source CLI first |

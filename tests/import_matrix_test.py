@@ -426,6 +426,19 @@ class ImportMatrix(unittest.TestCase):
         finally:
             c.close()
 
+    def test_omp_sidecar_symlink(self):
+        self.db(".omp/agent/agent.db", [("old", None)])
+        self.db("stage/omp/agent.db", [("new", None)])
+        target = self.put("outside-db", "keep")
+        before = (self.home / ".omp/agent/agent.db").read_bytes()
+        for suffix in ("-wal", "-shm"):
+            link = self.home / (".omp/agent/agent.db" + suffix)
+            link.symlink_to(target)
+            self.apply("omp", "--overwrite", rc=2)
+            self.assertTrue((self.home / ".omp/agent/agent.db").read_bytes() == before)
+            self.assertEqual(target.read_text(), "keep")
+            link.unlink()
+
     def test_omp_stale_wal(self):
         self.db(".omp/agent/agent.db", [("old", None)])
         self.db("stage/omp/agent.db", [("new", None)])
@@ -484,6 +497,20 @@ class ImportMatrix(unittest.TestCase):
         self.put("codex/AGENTS.md", "bad", self.stage)
         self.apply("codex", rc=2)
         self.assertFalse(list(outside.iterdir()))
+        (self.home / ".codex").unlink()
+        target = self.put("sentinel", "keep", outside)
+        dest = self.home / ".codex/AGENTS.md"
+        dest.parent.mkdir()
+        for point in (target, outside / "dangling"):
+            dest.symlink_to(point)
+            self.apply("codex", rc=2)
+            self.assertEqual(target.read_text(), "keep")
+            self.assertFalse((outside / "dangling").exists())
+            dest.unlink()
+        # An old predictable temp name cannot clobber its target.
+        (dest.parent / "AGENTS.md.import-tmp").symlink_to(target)
+        self.apply("codex")
+        self.assertEqual(target.read_text(), "keep")
 
     def test_manifest_roots(self):
         for root in (".ssh", ".aws", "../escape", "/absolute", ".config/google-chrome"):
@@ -679,6 +706,91 @@ class ImportMatrix(unittest.TestCase):
         self.stub("pi", 'echo "Error: $CANARY" >&2; exit 1\n')
         p = self.call("parity_check.py", "--cli", "pi", rc=1)
         self.assertFalse(p["pi"]["ok"])
+        self.put("_meta/manifest.txt", "version pi " + "9" * 5000 + ".1.0 " + self.canary + "\n", self.stage)
+        self.put("pi/AGENTS.md", "safe", self.stage)
+        d = self.apply("pi")
+        self.assertEqual(d["post_install"]["version"]["computer"], "unknown")
+
+    def test_pi_overlay(self):
+        base = self.home / "runtime/node_modules"
+        for name, version in (("@fixture/main", "1.0.0"), ("@fixture/core", "1.0.0"), ("other", "2.0.0")):
+            self.js("package.json", {"name": name, "version": version}, base / name)
+            self.put("index.js", "box", base / name)
+            self.js("pi/npm/node_modules/" + name + "/package.json", {"name": name, "version": "1.0.0"}, self.stage)
+            self.put("pi/npm/node_modules/" + name + "/index.js", "patch", self.stage)
+        self.stub("pi", 'printf "  npm:@fixture/main\\n    %s/runtime/node_modules/@fixture/main\\n" "$HOME"\n')
+        d = self.apply("pi")
+        self.assertEqual({x["package"] for x in d["post_install"]["npm_overlay"]}, {"@fixture/main", "@fixture/core"})
+        self.assertEqual((base / "@fixture/main/index.js").read_text(), "patch")
+        self.assertEqual((base / "@fixture/core/index.js").read_text(), "patch")
+        self.assertEqual((base / "other/index.js").read_text(), "box")
+
+    def test_overlay_symlinks(self):
+        base = self.home / "runtime/node_modules/fixture"
+        self.js("package.json", {"name": "fixture", "version": "1.0.0"}, base)
+        self.js("pi/npm/node_modules/fixture/package.json", {"name": "fixture", "version": "1.0.0"}, self.stage)
+        self.stub("pi", 'printf "  npm:fixture\\n    %s/runtime/node_modules/fixture\\n" "$HOME"\n')
+        target = self.put("outside", "keep")
+        (base / "index.js").symlink_to(target)
+        self.put("pi/npm/node_modules/fixture/index.js", "patch", self.stage)
+        self.apply("pi", "--keep-stage")
+        self.assertEqual(target.read_text(), "keep")
+        (base / "index.js").unlink()
+        (self.stage / "pi/npm/node_modules/fixture/index.js").unlink()
+        (self.stage / "pi/npm/node_modules/fixture/index.js").symlink_to(target)
+        self.apply("pi")
+        self.assertFalse((base / "index.js").exists())
+
+    def test_pi_venv(self):
+        root = "projects/local package"
+        self.js("pi/_home/" + root + "/package.json", {"name": "fixture"}, self.stage)
+        self.put("_meta/manifest.txt", "home " + root + "\nvenv " + root + " 3.11\npip " + root + " fixture==1.0\n", self.stage)
+        self.stub("pi", "exit 0\n")
+        self.stub("uv", 'echo "$*" >> "$HOME/uv-calls"\n'
+                  'if [ "$1" = venv ]; then mkdir -p .venv/bin; : > .venv/bin/python; fi\n')
+        d = self.apply("pi")
+        self.assertTrue(d["post_install"]["venvs"][0]["ok"])
+        self.assertEqual((self.home / root / ".venv/import-requirements.txt").read_text(), "fixture==1.0\n")
+        self.assertEqual((self.home / "uv-calls").read_text().count("\n"), 2)
+
+    def test_claude_plugins(self):
+        old, sha = "a" * 40, "b" * 40
+        market = self.home / "market"
+        (market / ".git").mkdir(parents=True)
+        box = self.home / ".claude/plugins"
+        (box / "cache/fixture/sample/old").mkdir(parents=True)
+        self.js("known_marketplaces.json", {"fixture": {"installLocation": str(market)}}, box)
+        self.js("installed_plugins.json", {"plugins": {"sample@fixture": [{"version": "old", "gitCommitSha": old,
+                "installPath": str(box / "cache/fixture/sample/old") }]}}, box)
+        self.js("claude/plugins/installed_plugins.json", {"plugins": {"sample@fixture": [{"version": "1.0.0", "gitCommitSha": sha}]}}, self.stage)
+        self.stub("claude", "exit 0\n")
+        tool = self.stub("fixture-hud", "exit 0\n")
+        self.js("claude/settings.json", {"enabledPlugins": {"sample@fixture": True},
+                "statusLine": {"command": '\"' + str(self.home / "missing tools/fixture-hud") + '\" --status'}}, self.stage)
+        archive = self.archive([("plugins/sample/index.js", "pinned", tarfile.REGTYPE)])
+        self.stub("git", 'case "$3" in\n cat-file) exit 0;;\n'
+                  ' show) echo \'{"plugins":[{"name":"sample","source":"./plugins/sample"}]}\';;\n'
+                  ' archive) cat "$FIXTURE_ARCHIVE";;\n *) exit 1;;\nesac\n')
+        d = self.apply("claude", extra={"FIXTURE_ARCHIVE": str(archive)})
+        self.assertEqual(d["post_install"]["plugins_pinned"][0]["sha"], sha[:12])
+        self.assertEqual((box / "cache/fixture/sample/1.0.0/index.js").read_text(), "pinned")
+        self.assertEqual(json.loads((box / "installed_plugins.json").read_text())["plugins"]["sample@fixture"][0]["gitCommitSha"], sha)
+        command = json.loads((self.home / ".claude/settings.json").read_text())["statusLine"]["command"]
+        import shlex
+        self.assertEqual(shlex.split(command), [str(tool), "--status"])
+
+    def test_dependency_install(self):
+        self.js("pi/extensions/sample/package.json", {"dependencies": {"fixture": "1.0.0"}}, self.stage)
+        self.js("pi/extensions/sample/package-lock.json", {}, self.stage)
+        self.js("pi/packages/local/package.json", {"devDependencies": {"fixture": "1.0.0"}}, self.stage)
+        self.stub("npm", 'echo "$PWD|$*" >> "$HOME/npm-calls"\n'
+                  'echo "$CANARY" >&2\n[ "$1" != ci ]\n')
+        d = self.apply("pi")
+        self.assertTrue(all(x["ok"] for x in d["deps_installed"]))
+        calls = (self.home / "npm-calls").read_text().splitlines()
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all("--omit=dev" in c for c in calls if "/extensions/" in c))
+        self.assertTrue(all("--omit=dev" not in c for c in calls if "/packages/" in c))
 
     def test_verify_status(self):
         for rc in (7, 0):
@@ -698,6 +810,61 @@ class ImportMatrix(unittest.TestCase):
         self.js("codex/auth.json", {"OPENAI_API_KEY": self.canary}, self.stage)
         self.apply("codex", extra={"HOME": str(box)})
         self.assertFalse((box / ".grok-bot-agents/config.json").exists())
+
+    def test_verify_identical_auth(self):
+        auth = {"OPENAI_API_KEY": self.canary}
+        self.js(".codex/auth.json", auth)
+        self.js("codex/auth.json", auth, self.stage)
+        self.stub("codex", "exit 0\n")
+        d = self.call("apply_import.sh", "codex")
+        self.assertFalse(d["backups"])
+        self.assertTrue((self.home / ".grok-bot-agents/config.json").is_file())
+
+    def test_verify_existing_config(self):
+        config = self.js(".grok-bot-agents/config.json", {
+            "version": 1, "enabled": ["pi"], "permission_mode": "safe", "worktree_per_task": True,
+            "timeout_sec": 120, "agents": {"pi": {"auth": "oauth", "model": "keep"},
+            "codex": {"auth": "oauth", "model": "old"}}, "routing": {"mode": "ask"}})
+        self.js("codex/auth.json", {"OPENAI_API_KEY": self.canary}, self.stage)
+        self.stub("codex", "exit 0\n")
+        self.call("apply_import.sh", "codex")
+        data = json.loads(config.read_text())
+        self.assertEqual(data["enabled"], ["codex", "pi"])
+        self.assertEqual(data["permission_mode"], "safe")
+        self.assertEqual(data["agents"]["pi"]["model"], "keep")
+        self.assertEqual(data["agents"]["codex"]["model"], "native")
+        config.unlink()
+        target = self.put("outside-config", self.canary)
+        config.symlink_to(target)
+        self.js("codex/auth.json", {"OPENAI_API_KEY": self.canary + "-new"}, self.stage)
+        d = self.call("apply_import.sh", "codex", "--overwrite")
+        self.assertIn("failed", d["config"])
+        self.assertTrue(target.read_text() == self.canary)
+
+    def test_stage_aux_symlinks(self):
+        target = self.put("outside", self.canary)
+        for rel, member in (("_meta/manifest.txt", ".agent-import-manifest.txt"),
+                            ("_secrets/secrets.env", ".agent-import-secrets/secrets.env")):
+            with self.subTest(path=rel):
+                link = self.stage / rel
+                link.parent.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(target)
+                self.call("stage_tar.py", self.archive([(member, "home projects/pkg\n", tarfile.REGTYPE)]), rc=2)
+                self.assertTrue(target.read_text() == self.canary)
+                link.unlink()
+
+    def test_apply_aux_symlinks(self):
+        target = self.put("outside-aux", self.canary)
+        for rel in ("_meta/manifest.txt", "_secrets/rewrites.txt", "_secrets/secrets.env"):
+            with self.subTest(path=rel):
+                link = self.stage / rel
+                link.parent.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(target)
+                self.put("pi/AGENTS.md", "new", self.stage)
+                self.apply("pi", rc=2)
+                self.assertFalse((self.home / ".pi/agent/AGENTS.md").exists())
+                self.assertTrue(target.read_text() == self.canary)
+                link.unlink()
 
     def test_parity_no_run(self):
         self.stub("pi", 'echo called >> "$HOME/cli-calls"; echo "$CANARY"; exit 1\n')

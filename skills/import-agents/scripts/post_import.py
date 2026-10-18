@@ -17,8 +17,8 @@ Auth helpers (used by apply_import.sh before files are written, so re-imports co
 - rewrite_refs: Pi auth.json / models.json and omp models.yml `!command` / op:// keys that export_secrets.sh resolved
   become env-name references (_secrets/rewrites.txt: "<cli> <file> <provider> <ENV>").
 """
-import json, os, re, shutil, subprocess
-from import_safety import atomic_write, claude_global, guard_path, package_root
+import json, os, re, shlex, shutil, subprocess
+from import_safety import MAX_FILE, atomic_write, claude_global, guard_path, package_root
 
 HOME = os.path.expanduser("~")
 ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=")
@@ -103,6 +103,7 @@ def pin_codex_file_store(text):
 def read_rewrites(stage_root):
     """[(cli, file, provider, env)] from _secrets/rewrites.txt (names only)."""
     p = os.path.join(stage_root, "_secrets", "rewrites.txt"); res = []
+    guard_path(p)
     if not os.path.isfile(p): return res
     for line in open(p, encoding="utf-8", errors="replace"):
         parts = line.split()
@@ -165,13 +166,17 @@ def last_line(text):
 def read_manifest(stage_root):
     m = {"home": [], "venv": {}, "pip": {}, "uvtool": {}, "version": {}}
     p = os.path.join(stage_root, "_meta", "manifest.txt")
+    guard_path(p)
     if not os.path.isfile(p): return m
     for line in open(p, encoding="utf-8", errors="replace"):
         parts = line.rstrip("\n").split(" ")
         k = parts[0]
         if k == "home" and len(parts) >= 2 and package_root(" ".join(parts[1:])): m["home"].append(" ".join(parts[1:]))
-        elif k == "venv" and len(parts) >= 3 and package_root(parts[1]): m["venv"][parts[1]] = parts[2]
-        elif k == "pip" and len(parts) >= 3 and package_root(parts[1]): m["pip"].setdefault(parts[1], []).append(parts[2])
+        elif k in ("venv", "pip") and len(parts) >= 3:
+            root, _, value = line.rstrip("\n")[len(k) + 1:].rpartition(" ")
+            if package_root(root):
+                if k == "venv": m["venv"][root] = value
+                else: m["pip"].setdefault(root, []).append(value)
         elif k == "uvtool" and len(parts) >= 3: m["uvtool"][parts[2]] = parts[1]
         elif k == "version" and len(parts) >= 3: m["version"][parts[1]] = " ".join(parts[2:])
     return m
@@ -179,7 +184,10 @@ def read_manifest(stage_root):
 
 def vtuple(s):
     m = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", s or "")
-    return tuple(int(x or 0) for x in m.groups()) if m else None
+    try:
+        return tuple(int(x or 0) for x in m.groups()) if m else None
+    except ValueError:
+        return None  # e.g. Python's limit on excessively long integer strings
 
 
 def check_version(cli, man, warnings):
@@ -240,7 +248,9 @@ def npm_name(spec):
 
 
 def pkg_version(d):
-    try: return json.load(open(os.path.join(d, "package.json"), encoding="utf-8")).get("version")
+    try:
+        guard_path(os.path.join(d, "package.json"))
+        return json.load(open(os.path.join(d, "package.json"), encoding="utf-8")).get("version")
     except Exception: return None
 
 
@@ -258,6 +268,7 @@ def pi_post(stage, dest_root, man, warnings):
         if still: warnings.append(f"pi packages still not installed: {still}; run `pi install <spec>` on the box")
     # overlay the computer's npm package files over the same versions (keeps local patches)
     ov_root = os.path.join(stage, "npm", "node_modules")
+    guard_path(ov_root)
     if os.path.isdir(ov_root):
         resolved = {npm_name(s): p for s, p in listed.items() if s.startswith("npm:") and p}
         hoist = set()
@@ -273,6 +284,7 @@ def pi_post(stage, dest_root, man, warnings):
         report = []
         for name in pkgs:
             src = os.path.join(ov_root, name); sv = pkg_version(src)
+            if not isinstance(sv, str) or not sv: continue
             cands = ([resolved[name]] if name in resolved else []) + \
                     [os.path.join(p, "node_modules", name) for p in resolved.values()] + \
                     [os.path.join(h, name) for h in sorted(hoist)] + [os.path.join(HOME, ".pi/agent/npm/node_modules", name)]
@@ -285,10 +297,11 @@ def pi_post(stage, dest_root, man, warnings):
             for root, _, files in os.walk(src):
                 for f in files:
                     s = os.path.join(root, f); t = os.path.join(tgt, os.path.relpath(s, src))
+                    guard_path(s); guard_path(t)
+                    if not os.path.isfile(s) or os.path.getsize(s) > MAX_FILE: continue
                     data = open(s, "rb").read()
                     if os.path.isfile(t) and open(t, "rb").read() == data: continue
-                    os.makedirs(os.path.dirname(t), exist_ok=True)
-                    with open(t, "wb") as fh: fh.write(data)
+                    atomic_write(t, data, 0o700 if os.stat(s).st_mode & 0o111 else 0o600)
                     changed += 1
             if changed: report.append({"package": name, "version": sv, "files_patched": changed, "into": tgt})
         res["npm_overlay"] = report
@@ -400,12 +413,14 @@ def claude_post(stage, dest_root, man, warnings):
     # hook / statusLine commands whose absolute tool path is missing: use the box's copy of that tool
     fixes = []
     def fix(cmd):
-        m = re.match(r"^(['\"]?)(/[^\s'\"]+)\1(?=\s|$)", cmd or "")
-        if not m or os.path.exists(m.group(2)) or not m.group(2).startswith(HOME + "/"): return cmd
-        alt = shutil.which(os.path.basename(m.group(2)))
+        m = re.match(r'''^(?:"(/[^"]*)"|'(/[^']*)'|(/[^\s'"]+))(?=\s|$)''', cmd or "")
+        if not m: return cmd
+        path = next(p for p in m.groups() if p is not None)
+        if os.path.exists(path) or not path.startswith(HOME + "/"): return cmd
+        alt = shutil.which(os.path.basename(path))
         if not alt: return cmd
-        fixes.append({"from": m.group(2), "to": alt})
-        return alt + cmd[m.end():]
+        fixes.append({"from": path, "to": alt})
+        return shlex.quote(alt) + cmd[m.end():]
     sl = settings.get("statusLine")
     if isinstance(sl, dict) and sl.get("command"): sl["command"] = fix(sl["command"])
     for groups in (settings.get("hooks") or {}).values():

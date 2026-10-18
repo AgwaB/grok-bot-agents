@@ -9,9 +9,10 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; S="$ROOT/skills/import-agents/scripts"
 CANARY="CANARY$RANDOM$RANDOM"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+export HOME="$T/runner"; mkdir -p "$HOME"
 SRC="$T/src"; BOX="$T/box"; STUB="$T/stub"; MAC="$T/mac"; LOG="$T/log.txt"; mkdir -p "$SRC" "$BOX" "$STUB" "$MAC"
-fail=0; ok() { echo "ok   $1"; }; bad() { echo "FAIL $1"; fail=1; }
-check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
+fail=0; checks=0; ok() { echo "ok   $1"; }; bad() { echo "FAIL $1"; fail=1; }
+check() { checks=$((checks + 1)); if eval "$2" >"$T/check.out" 2>&1; then ok "$1"; else bad "$1"; fi; }
 bash "$ROOT/tests/fake_home.sh" "$SRC" "$CANARY"
 printf 'export DEEPSEEK_API_KEY=%s-envds\necho "rc noise"\n' "$CANARY" >"$SRC/.bashrc"
 # stubs: fake macOS (uname, security), password tools, node
@@ -23,8 +24,17 @@ case "\$*" in *"Claude Code-credentials"*|*"Codex Auth"*) printf 'attributes:\n 
 exit 44
 SH
 printf '#!/bin/sh\necho %s-passval\n' "$CANARY" >"$STUB/pass"; printf '#!/bin/sh\necho %s-opval\n' "$CANARY" >"$STUB/op"
+# Block every executable that could install, refresh, or contact a real credential store.
+for tool in claude codex pi omp npm npx uv uvx git secret-tool; do
+  printf '#!/bin/sh\nexit 127\n' >"$STUB/$tool"
+done
 chmod +x "$MAC/uname" "$STUB"/*; ln -s "$(command -v node)" "$STUB/node"
-SRCENV=(env -i HOME="$SRC" USER=tester SHELL=/bin/bash PATH="$MAC:$STUB:/usr/bin:/bin" OPENAI_API_KEY="$CANARY-proc")
+for h in "$SRC" "$BOX"; do mkdir -p "$h/.local"; ln -s "$STUB" "$h/.local/bin"; done
+# Emulate login startup using only the fake rc file, never /etc/profile or an OS account home.
+# shellcheck disable=SC2016 # These variables belong to the stub, not this test process.
+printf '#!/bin/sh\n. "$HOME/.bashrc"\n/bin/sh -c "$2"\n' >"$STUB/login-shell"
+chmod +x "$STUB/login-shell"
+SRCENV=(env -i HOME="$SRC" USER=tester SHELL="$STUB/login-shell" PATH="$MAC:$STUB:/usr/bin:/bin" OPENAI_API_KEY="$CANARY-proc")
 BOXENV=(env -i HOME="$BOX" PATH="$STUB:/usr/bin:/bin" AGENT_IMPORT_STAGE="$BOX/stage")
 run() { local n=$1; shift; echo "== $n" >>"$LOG"; "$@" >"$T/$n.out" 2>>"$LOG"; local rc=$?; cat "$T/$n.out" >>"$LOG"; return $rc; }
 
@@ -56,7 +66,7 @@ check "default bundle is 600" "[ \$(stat -c %a '$SRC/agent-import.tgz') = 600 ]"
 check "no SSH key in the bundle" "! grep -q .ssh '$T/members_default.txt'"
 mv "$SRC/agent-import.tgz" "$T/bundle_default.tgz"
 # default path on a second box: no rotating login copied -> box-login warnings, no two-machine warning
-BOX2="$T/box2"; mkdir -p "$BOX2"
+BOX2="$T/box2"; mkdir -p "$BOX2/.local"; ln -s "$STUB" "$BOX2/.local/bin"
 run stage_default env -i HOME="$BOX2" PATH="$STUB:/usr/bin:/bin" AGENT_IMPORT_STAGE="$BOX2/stage" python3 "$S/stage_tar.py" "$T/bundle_default.tgz"
 for c in claude codex; do run "default_$c" env -i HOME="$BOX2" PATH="$STUB:/usr/bin:/bin" AGENT_IMPORT_STAGE="$BOX2/stage" bash "$S/apply_import.sh" "$c" --src-home "$SRC" --no-verify; done
 check "default import: Claude/Codex say 'log in on the box', no login files, no two-machine warning" "grep -q 'Claude login not copied (default)' '$T/default_claude.out' && grep -q 'Codex login not copied (default)' '$T/default_codex.out' && [ ! -e '$BOX2/.claude/.credentials.json' ] && [ ! -e '$BOX2/.codex/auth.json' ] && grep -q '\"two_machine_warning\": null' '$T/default_claude.out'"
@@ -89,6 +99,7 @@ run parity "${BOXENV[@]}" python3 "$S/parity_check.py" --no-run; :
 check "parity auth section reports by name (unset env, missing tool, remote MCP, ToS flag)" "python3 -c 'import json;d=json.load(open(\"$T/parity.out\"));a=json.dumps({c:v[\"auth\"] for c,v in d.items()});assert \"R2_KEY\" in a and \"codex mcp login linear\" in a and \"ToS\" in a and \"apiKeyHelper\" in a, a'"
 # 5. the canary must not appear in ANY script output
 n=$(grep -c "$CANARY" "$LOG"); check "no secret value in any script output ($(wc -l <"$LOG") lines checked)" "[ $n = 0 ]"
-[ -n "${KEEP_LOG:-}" ] && cp "$LOG" "$KEEP_LOG"
-if [ "$fail" = 0 ]; then echo "PASS"; else echo "FAILED (log kept at $T.log)"; cp "$LOG" "$T.log"; fi
+# Never persist value-bearing diagnostics, even when the redaction assertion fails.
+if [ -n "${KEEP_LOG:-}" ] && [ "$n" = 0 ]; then cp "$LOG" "$KEEP_LOG"; fi
+if [ "$fail" = 0 ]; then echo "PASS ($checks checks)"; else echo "FAILED ($checks checks; diagnostics suppressed)"; fi
 exit $fail

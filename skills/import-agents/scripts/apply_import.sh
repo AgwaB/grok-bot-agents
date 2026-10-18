@@ -63,7 +63,8 @@ dest_root = env_dir or os.path.join(HOME, p["home"])
 try:
     guard_path(stage); guard_path(dest_root)
 except ValueError: die("symlink in staging or destination path")
-PACKAGE_ROOTS = post_import.read_manifest(STAGE_ROOT)["home"]
+try: PACKAGE_ROOTS = post_import.read_manifest(STAGE_ROOT)["home"]
+except (ValueError, OSError): die("unsafe or unreadable import manifest")
 
 # allowlist: (pattern, kind)
 allow = []
@@ -101,7 +102,8 @@ if src_home:
     home_variants = sorted({s, s.replace("\\", "/"), s.replace("\\", "\\\\")}, key=len, reverse=True)
 ABS = re.compile(r'(/Users/[^/"\s]+|/home/(?!box\b)[^/"\s]+|[A-Za-z]:\\\\?Users\\\\?[^\\"\s]+|/Applications/|/opt/homebrew/|/Volumes/|/Library/|/System/|\.app/Contents/)')
 
-REWRITES = post_import.read_rewrites(STAGE_ROOT)
+try: REWRITES = post_import.read_rewrites(STAGE_ROOT)
+except (ValueError, OSError): die("unsafe or unreadable key rewrites")
 auth_notes = {}  # names only: refs rewritten to env names, codex stores pinned
 
 def transform(data, rel, kind):
@@ -216,6 +218,7 @@ def omp_creds(d):
     try:
         os.chmod(t, 0o700)
         for n in ("agent.db", "agent.db-wal", "agent.db-shm"):
+            guard_path(os.path.join(d, n))
             if os.path.isfile(os.path.join(d, n)): shutil.copyfile(os.path.join(d, n), os.path.join(t, n))
         c = sqlite3.connect(os.path.join(t, "agent.db"))
         try:
@@ -232,6 +235,9 @@ omp_auth = None
 DB = ("agent.db", "agent.db-wal", "agent.db-shm")  # one unit: logins may sit only in the WAL
 db_changed = cli == "omp" and any(x["rel"] in DB for x in plan)
 if db_changed:
+    try:
+        for n in DB: guard_path(os.path.join(dest_root, n))
+    except ValueError: die("symlink in omp destination database")
     staged_c, box_c = omp_creds(stage), omp_creds(dest_root)
     s_ok = [c["provider"] for c in staged_c or [] if c["enabled"]]
     b_ok = [c["provider"] for c in box_c or [] if c["enabled"]]
@@ -338,7 +344,8 @@ if conflicts and not overwrite:
     out["planned"] = compact([x["rel"] for x in plan])
     if omp_auth: out["omp_auth"] = omp_auth
     summarize_skipped(); print(json.dumps(out, indent=2)); sys.exit(4)
-pending_keys = post_import.merge_agent_keys(STAGE_ROOT, dry=True)
+try: pending_keys = post_import.merge_agent_keys(STAGE_ROOT, dry=True)
+except (ValueError, OSError): die("unsafe keys or staging path")
 if dry:
     if pending_keys: out["agent_keys"] = dict(pending_keys, note="merged into ~/.agent-keys on the real run (or `apply_import.sh keys`)")
     if auth_notes: out["auth"] = auth_notes
@@ -360,7 +367,8 @@ def ensure_dir(d):
         os.chmod(x, 0o700)
 
 if pending_keys:
-    out["agent_keys"] = post_import.merge_agent_keys(STAGE_ROOT)
+    try: out["agent_keys"] = post_import.merge_agent_keys(STAGE_ROOT)
+    except (ValueError, OSError): die("unsafe keys or staging path")
 for x in plan:
     dest = x["dest"]; ensure_dir(os.path.dirname(dest))
     if os.path.exists(dest): backup(dest)
@@ -392,16 +400,25 @@ if not out["parity"]["ok"]:
     warnings.append("parity check found breaking gaps: " + "; ".join(f"{g['item']}: {g['detail']}" for g in out["parity"]["gaps"] + out["parity"].get("auth", []) if g["impact"] == "breaking")[:400])
 
 # central config
-cfg = os.path.join(here, "..", "..", "configure-agents", "scripts", "agents_config.py")
+sys.path.insert(0, os.path.join(here, "..", "..", "configure-agents", "scripts"))
 verified = not noverify and (out.get("verify") or {}).get("rc") == 0
-if any(i.get("kind") == "auth" for i in out["installed"]) and not verified:
+imported_auth = any(kind_of(rel) == "auth" for rel in staged_rels) and not (omp_auth and omp_auth["action"] == "kept_box_login")
+if imported_auth and not verified:
     out["config"] = "unchanged: status check skipped or failed (files are installed; verify the login before enabling)"
-elif any(i.get("kind") == "auth" for i in out["installed"]):
-    r1 = subprocess.run([sys.executable, cfg, "enable", cli], capture_output=True, text=True)
-    # follow the imported native model/reasoning: "native" = the runner passes no --model / reasoning flag
-    r2 = subprocess.run([sys.executable, cfg, "set", f"agents.{cli}.auth", "imported",
-                         f"agents.{cli}.model", "native", f"agents.{cli}.reasoning", "native"], capture_output=True, text=True)
-    out["config"] = "enabled, auth=imported, model/reasoning=native" if r1.returncode == 0 and r2.returncode == 0 else "config update failed (output suppressed)"
+elif imported_auth:
+    try:
+        import agents_config
+        guard_path(agents_config.PATH)
+        config = agents_config.load()
+        if config is None: config = agents_config.default_config([])
+        config["enabled"] = [a for a in agents_config.AGENTS if a == cli or a in config["enabled"]]
+        # Keep other agents/settings; initialize only after a successful status check.
+        config["agents"][cli].update(auth="imported", model="native", reasoning="native")
+        if agents_config.validate(config): raise ValueError("invalid central config")
+        agents_config.save(config)
+        out["config"] = "enabled, auth=imported, model/reasoning=native"
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        out["config"] = "config update failed (output suppressed)"
 else:
     out["config"] = "unchanged (no auth file imported)"
 
