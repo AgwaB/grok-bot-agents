@@ -136,6 +136,7 @@ Code reviews use `--review DIR`. No worktree: the agent runs read-only inside DI
 and untracked files) and points the agent at it. A fingerprint of DIR (HEAD, `git status`, file hashes)
 is taken before and after. If anything changed, the result is `status: error` and `review_unchanged: false`.
 Nothing is cleaned up automatically. Tell the user and show `git -C DIR status`.
+
 For anything longer than a quick check, run it in the background so you get a completion notice:
 - Start `run-agent.sh` itself as the background Shell command (`block_until_ms: 0`). Never wrap it in
   `nohup ... &` or `setsid`; a detached process sends no notice, and the run looks lost.
