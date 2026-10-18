@@ -1,0 +1,33 @@
+{
+  "name": "grok-agents",
+  "displayName": "CLI Agents for Grok Bot",
+  "version": "0.1.0",
+  "description": "Delegate heavy work from Grok Bot to Claude Code, Codex CLI, Pi and Oh My Pi (omp) running on the box. That covers code, repo and document research, data and file processing, bulk transforms, long drafts and translations, log analysis, and long or unattended jobs. The bot keeps light work for itself. Pick agents, sign in, set API keys without pasting them in chat, or import existing CLI logins and settings from your own computer, set models and reasoning, then name a CLI or let the bot route by cost and difficulty. Runs are headless and isolated (git worktree, or a per-run work dir), full-auto by default with a safe mode, and come back as short summaries with artifact paths. Includes a webhook bridge for local agents.",
+  "author": {
+    "name": "AgwaB"
+  },
+  "license": "MIT",
+  "logo": "assets/logo.svg",
+  "keywords": [
+    "automation",
+    "claude-code",
+    "codex",
+    "coding-agents",
+    "delegation",
+    "grok-bot",
+    "headless",
+    "oh-my-pi",
+    "omp",
+    "orchestration",
+    "pi"
+  ],
+  "category": "developer-tools",
+  "tags": [
+    "cli-agents",
+    "codex",
+    "claude-code",
+    "pi",
+    "omp"
+  ],
+  "skills": "./skills/"
+}
