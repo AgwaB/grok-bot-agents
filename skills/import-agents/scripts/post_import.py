@@ -18,6 +18,7 @@ Auth helpers (used by apply_import.sh before files are written, so re-imports co
   become env-name references (_secrets/rewrites.txt: "<cli> <file> <provider> <ENV>").
 """
 import json, os, re, shutil, subprocess
+from import_safety import atomic_write, claude_global, guard_path, package_root
 
 HOME = os.path.expanduser("~")
 ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=")
@@ -50,6 +51,7 @@ def merge_agent_keys(stage_root, dry=False, keys_path=None):
     """Merge <stage_root>/_secrets/secrets.env into ~/.agent-keys. Returns names only."""
     src = os.path.join(stage_root, "_secrets", "secrets.env")
     keys_path = keys_path or os.path.join(HOME, ".agent-keys")
+    guard_path(src); guard_path(keys_path); guard_path(os.path.join(HOME, ".bashrc"))
     if not os.path.isfile(src): return None
     new, bad = {}, 0
     for line in open(src, encoding="utf-8", errors="replace").read().splitlines():
@@ -70,10 +72,7 @@ def merge_agent_keys(stage_root, dry=False, keys_path=None):
     for k in ("added", "replaced", "unchanged"): res[k] = sorted(res[k])
     res["keys_file"] = keys_path
     if dry: return res
-    tmp = keys_path + ".tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f: f.write("\n".join(out) + "\n")
-    os.chmod(tmp, 0o600); os.replace(tmp, keys_path)
+    atomic_write(keys_path, ("\n".join(out) + "\n").encode("utf-8"))
     shred(src)
     rc = os.path.join(HOME, ".bashrc")
     try: has = "agent-keys" in open(rc, encoding="utf-8", errors="replace").read()
@@ -170,9 +169,9 @@ def read_manifest(stage_root):
     for line in open(p, encoding="utf-8", errors="replace"):
         parts = line.rstrip("\n").split(" ")
         k = parts[0]
-        if k == "home" and len(parts) >= 2: m["home"].append(" ".join(parts[1:]))
-        elif k == "venv" and len(parts) >= 3: m["venv"][parts[1]] = parts[2]
-        elif k == "pip" and len(parts) >= 3: m["pip"].setdefault(parts[1], []).append(parts[2])
+        if k == "home" and len(parts) >= 2 and package_root(" ".join(parts[1:])): m["home"].append(" ".join(parts[1:]))
+        elif k == "venv" and len(parts) >= 3 and package_root(parts[1]): m["venv"][parts[1]] = parts[2]
+        elif k == "pip" and len(parts) >= 3 and package_root(parts[1]): m["pip"].setdefault(parts[1], []).append(parts[2])
         elif k == "uvtool" and len(parts) >= 3: m["uvtool"][parts[2]] = parts[1]
         elif k == "version" and len(parts) >= 3: m["version"][parts[1]] = " ".join(parts[2:])
     return m
@@ -415,7 +414,7 @@ def claude_post(stage, dest_root, man, warnings):
     if fixes:
         tmp = sp + ".tmp"; json.dump(settings, open(tmp, "w", encoding="utf-8"), indent=2); os.chmod(tmp, 0o600); os.replace(tmp, sp)
         res["tool_paths_fixed"] = fixes
-    try: cj = json.load(open(os.path.join(HOME, ".claude.json"), encoding="utf-8"))
+    try: cj = json.load(open(claude_global(HOME), encoding="utf-8"))
     except Exception: cj = {}
     miss = [v.get("command") for v in (cj.get("mcpServers") or {}).values() if isinstance(v, dict) and v.get("command") and not which_cmd(v.get("command"))]
     tools = install_uvtools(miss, man, warnings)
@@ -442,7 +441,15 @@ def codex_post(stage, dest_root, man, warnings):
             hdr = re.compile(r"(?m)^\[mcp_servers\.(?:\"%s\"|%s)\]\s*$" % (re.escape(name), re.escape(name)))
             m = hdr.search(text)
             if m:
-                text = text[:m.end()] + "\nenabled = false  # box: the program isn't on this machine (grok-bot-agents import)" + text[m.end():]
+                tail = text[m.end():]
+                next_header = re.search(r"(?m)^\[", tail)
+                end = m.end() + next_header.start() if next_header else len(text)
+                block = text[m.end():end]
+                line = "enabled = false  # box: the program isn't on this machine (grok-bot-agents import)"
+                if re.search(r"(?m)^[ \t]*enabled[ \t]*=", block):
+                    block = re.sub(r"(?m)^[ \t]*enabled[ \t]*=.*$", line, block, count=1)
+                else: block = "\n" + line + "\n" + block
+                text = text[:m.end()] + block + text[end:]
                 disabled.append(name)
         else: miss.append(cmd)
     n = cfg.get("notify")

@@ -21,35 +21,69 @@
 # web-search*.json; ~/.pi/agent/.env only with --include .pi/agent/.env. --skip drops a path the user unticked.
 # ~/.agent-import-secrets/ (written by export_secrets.sh from the consent card) is bundled, then deleted here.
 umask 077
-copy_login=""; incl=" "; skipl=" "; n=$#
+copy_login=""; incl=" "; skipl=""; n=$#
 while [ "$n" -gt 0 ]; do
   a=$1; shift; n=$((n - 1))
   case "$a" in
-    --copy-login) copy_login=",$1,"; shift; n=$((n - 1)) ;;
-    --include) incl="$incl$1 "; shift; n=$((n - 1)) ;;
-    --skip) skipl="$skipl$1 "; shift; n=$((n - 1)) ;;
+    --copy-login|--include|--skip)
+      [ "$n" -gt 0 ] || { echo '{"ok":false,"error":"option needs a value"}'; exit 2; }
+      case "$a" in --copy-login) copy_login=",$1," ;; --include) incl="$incl$1 " ;; --skip) skipl="$skipl$1
+" ;; esac
+      shift; n=$((n - 1)) ;;
     *) set -- "$@" "$a" ;;
   esac
 done
 [ $# -gt 0 ] || { echo '{"ok":false,"error":"usage: bundle_local.sh [--copy-login claude,codex] [--include P] [--skip P] <cli>..."}'; exit 2; }
+for c in "$@"; do
+  case "$c" in
+    codex) override=${CODEX_HOME:-}; default="$HOME/.codex" ;;
+    claude) override=${CLAUDE_CONFIG_DIR:-}; default="$HOME/.claude" ;;
+    pi) override=${PI_CODING_AGENT_DIR:-}; default="$HOME/.pi/agent" ;;
+    omp) override=""; default="" ;;
+    *) echo '{"ok":false,"error":"unknown cli"}'; exit 2 ;;
+  esac
+  if [ -n "$override" ] && [ "${override%/}" != "$default" ]; then
+    echo '{"ok":false,"error":"CLI directory override is set: use per-file import, not bundle_local.sh"}'; exit 2
+  fi
+done
 PATH="$HOME/.local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 export PATH
 cd "$HOME" || exit 2
 hp=$(pwd -P)
 out="$HOME/agent-import.tgz"
 man=".agent-import-manifest.txt"
-list=$(mktemp 2>/dev/null || echo "/tmp/agent-import-list.$$")
+list=$(mktemp) || exit 1
+trap 'rm -f "$list" "$list.js" "$list.safe" "$man"' EXIT HUP INT TERM
 : >"$man"
+esc() { printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+static_codex() { # Parse, never infer "static" from the absence of a single-line tokens pattern.
+  cat >"$list.js" <<'JS'
+function run(a) {
+  try {
+    var t;
+    if (typeof require === "function") t = require("fs").readFileSync(a[0], "utf8");
+    else { ObjC.import("Foundation"); t = ObjC.unwrap($.NSString.stringWithContentsOfFileEncodingError($(a[0]), $.NSUTF8StringEncoding, $())); }
+    var j = JSON.parse(t);
+    return j && typeof j.OPENAI_API_KEY === "string" && j.OPENAI_API_KEY.length > 0 && !j.tokens ? "static" : "unknown";
+  } catch (e) { return "unknown"; }
+}
+if (typeof require === "function") console.log(run(process.argv.slice(2)));
+JS
+  if command -v node >/dev/null 2>&1; then r=$(node "$list.js" .codex/auth.json 2>/dev/null)
+  elif command -v bun >/dev/null 2>&1; then r=$(bun "$list.js" .codex/auth.json 2>/dev/null)
+  elif [ "$(uname -s)" = Darwin ]; then r=$(osascript -l JavaScript "$list.js" .codex/auth.json 2>/dev/null)
+  else r=unknown; fi
+  [ "$r" = static ]
+}
 entries=""; notes=""; npk=0; left=""
-leave() { left="$left${left:+,}\"$1\""; }
+leave() { left="$left${left:+,}\"$(esc "$1")\""; }
 add() { # a file, or every file under a dir (symlinked dirs followed, so linked skills become real files)
   [ -e "$1" ] || return 0
-  case "$skipl" in *" $1 "*) leave "$1 (unticked)"; return 0 ;; esac
   if [ -d "$1" ]; then
     find -L "$1" \( -name node_modules -o -name .git -o -name .venv -o -name __pycache__ -o -name .DS_Store -o -name '._*' \) \
       -prune -o -type f -print >>"$list" 2>/dev/null
   else printf '%s\n' "$1" >>"$list"; fi
-  entries="$entries${entries:+,}\"$1\""
+  entries="$entries${entries:+,}\"$(esc "$1")\""
 }
 note() { notes="$notes${notes:+,}\"$(printf '%s' "$1" | tr -d '\042\134')\""; }
 tree() { # files of one package dir (home-relative)
@@ -84,6 +118,7 @@ pi_packages() {
       *) case "$src" in /*) p=$src ;; "~"/*) p="$HOME/${src#"~/"}" ;; *) p=".pi/agent/$src" ;; esac
          p=$(cd "$p" 2>/dev/null && pwd -P) || { echo "missing $src" >>"$man"; continue; }
          case "$p" in "$hp"/*) r=${p#"$hp"/} ;; *) echo "outside_home $src" >>"$man"; continue ;; esac
+         case "$r" in .pi/agent/packages/*|.pi/agent/packages) ;; .*|*/../*|*/..|../*) note "unsafe package root skipped"; continue ;; esac
          tree "$r"
          case "$r" in .pi/agent/*) ;; *) echo "home $r" >>"$man" ;; esac
          if [ -x "$r/.venv/bin/python" ]; then
@@ -102,7 +137,7 @@ login() { # <cli> <path>: a rotating login file, bundled only with --copy-login 
 for c in "$@"; do
   case "$c" in
     codex)  # a ChatGPT login has a "tokens" object (rotating); an API-key auth.json doesn't (static, always copied)
-            if [ -f .codex/auth.json ] && ! grep -q '"tokens"[[:space:]]*:[[:space:]]*{' .codex/auth.json 2>/dev/null; then add .codex/auth.json
+            if [ -f .codex/auth.json ] && static_codex; then add .codex/auth.json
             else login codex .codex/auth.json; fi
             login codex .codex/.credentials.json
             for f in config.toml AGENTS.md prompts skills rules; do add ".codex/$f"; done ;;
@@ -118,7 +153,7 @@ for c in "$@"; do
             before=$(wc -l <"$list"); pi_packages; npk=$(( $(wc -l <"$list") - before ))
             [ "$npk" -gt 0 ] && entries="$entries${entries:+,}\".pi/agent/packages/\",\".pi/agent/npm/node_modules/\"" ;;
     omp)    for f in agent.db agent.db-wal agent.db-shm config.yml models.yml AGENTS.md mcp.json; do add ".omp/agent/$f"; done ;;
-    *) echo "{\"ok\":false,\"error\":\"unknown cli: $c\"}"; rm -f "$list" "$man"; exit 2 ;;
+    *) exit 2 ;;
   esac
   command -v "$c" >/dev/null 2>&1 && echo "version $c $(ver "$c")" >>"$man"
 done
@@ -129,16 +164,45 @@ secrets=0
 if [ -d .agent-import-secrets ]; then # consented exports from export_secrets.sh
   find .agent-import-secrets -type f ! -path '*/.tmp/*' >>"$list"; secrets=$(find .agent-import-secrets -type f ! -path '*/.tmp/*' | wc -l | tr -d ' ')
 fi
-if [ ! -s "$list" ]; then rm -f "$list" "$man"; rm -rf .agent-import-secrets; echo '{"ok":false,"error":"nothing to bundle"}'; exit 3; fi
+# Resolve links before tar -h, including parent-directory links. Never follow a skill into credentials.
+safe_source() {
+  p="$hp/$1"; hops=0
+  while [ -L "$p" ]; do
+    hops=$((hops + 1)); [ "$hops" -le 40 ] || return 1
+    link=$(readlink "$p") || return 1
+    case "$link" in /*) p=$link ;; *) p="$(dirname "$p")/$link" ;; esac
+  done
+  parent=$(cd "$(dirname "$p")" 2>/dev/null && pwd -P) || return 1
+  p="$parent/$(basename "$p")"
+  case "$p" in "$hp"/.ssh/*|"$hp"/.gnupg/*|"$hp"/.aws/*|"$hp"/.config/*|"$hp"/.mozilla/*|"$hp"/Library/*|"$hp"/.netrc|"$hp"/.git-credentials) return 1 ;;
+    "$hp"/*) [ -f "$p" ] ;; *) return 1 ;; esac
+}
+: >"$list.safe"
+while IFS= read -r f; do
+  skip=0
+  # Newline-delimited selections preserve spaces; a directory selection applies to all descendants.
+  oldifs=$IFS; IFS='
+'
+  for s in $skipl; do case "$f" in "${s%/}"|"${s%/}"/*) skip=1 ;; esac; done
+  IFS=$oldifs
+  if [ "$skip" = 1 ]; then leave "$f (unticked)"
+  elif safe_source "$f"; then printf '%s\n' "$f" >>"$list.safe"
+  else note "unsafe or dangling source skipped"; fi
+done <"$list"
+mv "$list.safe" "$list"
+if [ ! -s "$list" ]; then echo '{"ok":false,"error":"nothing to bundle"}'; exit 3; fi
 [ -s "$man" ] && printf '%s\n' "$man" >>"$list"
 rm -f "$out"
 # Every entry is a file already (dirs were expanded above), so node_modules of an npm overlay survives.
 COPYFILE_DISABLE=1 tar czhf "$out" --exclude='._*' --exclude='.DS_Store' --exclude='*.pyc' -T "$list" 2>/dev/null
 rc=$?
-rm -f "$list" "$man"; rm -rf .agent-import-secrets
-[ -f "$out" ] || { echo "{\"ok\":false,\"error\":\"tar failed (rc $rc)\"}"; exit 1; }
+if [ "$rc" -ne 0 ] || [ ! -f "$out" ]; then
+  rm -f "$out"
+  echo '{"ok":false,"error":"tar failed; consented exports kept for retry"}'; exit 1
+fi
+rm -rf .agent-import-secrets
 chmod 600 "$out"
 bytes=$(wc -c <"$out" | tr -d ' ')
 members=$(tar tzf "$out" 2>/dev/null | wc -l | tr -d ' ')
 # rc != 0 with a bundle usually means dangling symlinks were skipped.
-printf '{"ok":true,"bundle":"%s","bytes":%s,"members":%s,"pi_package_files":%s,"secret_files":%s,"tar_rc":%s,"entries":[%s],"left_out":[%s],"notes":[%s]}\n' "$out" "$bytes" "$members" "$npk" "$secrets" "$rc" "$entries" "$left" "$notes"
+printf '{"ok":true,"bundle":"%s","bytes":%s,"members":%s,"pi_package_files":%s,"secret_files":%s,"tar_rc":%s,"entries":[%s],"left_out":[%s],"notes":[%s]}\n' "$(esc "$out")" "$bytes" "$members" "$npk" "$secrets" "$rc" "$entries" "$left" "$notes"

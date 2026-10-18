@@ -29,10 +29,11 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
 exec python3 - "$HERE" "$@" <<'PY'
-import datetime, fnmatch, hashlib, json, os, re, shutil, stat, subprocess, sys
+import datetime, fnmatch, hashlib, json, os, re, shutil, stat, subprocess, sys, tempfile
 here, args = sys.argv[1], sys.argv[2:]
 sys.path.insert(0, here)
 from import_plan import PLAN
+from import_safety import atomic_write, claude_global, guard_path, package_root
 import post_import
 
 def die(msg, code=2):
@@ -40,7 +41,8 @@ def die(msg, code=2):
 
 STAGE_ROOT = os.environ.get("AGENT_IMPORT_STAGE", "/workspace/uploads/agent-import")
 if args and args[0] == "keys":
-    r = post_import.merge_agent_keys(STAGE_ROOT, dry="--dry-run" in args[1:])
+    try: r = post_import.merge_agent_keys(STAGE_ROOT, dry="--dry-run" in args[1:])
+    except (ValueError, OSError): die("unsafe keys or staging path")
     print(json.dumps({"ok": True, "dry_run": "--dry-run" in args[1:], "agent_keys": r} if r is not None
                      else {"ok": True, "agent_keys": None, "note": "no staged secrets.env"}, indent=2)); sys.exit(0)
 
@@ -55,8 +57,13 @@ HOME = os.path.expanduser("~")
 stage = os.path.join(STAGE_ROOT, cli)
 if not os.path.isdir(stage): die(f"nothing staged at {stage}")
 p = PLAN[cli]
-env_dir = {"codex": os.environ.get("CODEX_HOME"), "claude": os.environ.get("CLAUDE_CONFIG_DIR")}.get(cli)
+env_dir = {"codex": os.environ.get("CODEX_HOME"), "claude": os.environ.get("CLAUDE_CONFIG_DIR"),
+           "pi": os.environ.get("PI_CODING_AGENT_DIR")}.get(cli)
 dest_root = env_dir or os.path.join(HOME, p["home"])
+try:
+    guard_path(stage); guard_path(dest_root)
+except ValueError: die("symlink in staging or destination path")
+PACKAGE_ROOTS = post_import.read_manifest(STAGE_ROOT)["home"]
 
 # allowlist: (pattern, kind)
 allow = []
@@ -72,6 +79,9 @@ MAX = 200 * 1024 * 1024
 
 def kind_of(rel):
     parts = rel.split("/")
+    if cli == "pi" and rel.startswith("_home/"):
+        path = rel[len("_home/"):]
+        if not package_root(path) or not any(path.startswith(r + "/") for r in PACKAGE_ROOTS): return None
     inner = parts[2:] if parts[:2] == ["npm", "node_modules"] else parts  # Pi npm overlay lives under node_modules
     if parts[0] in SKIP_PARTS or set(inner) & {"__pycache__", "node_modules", ".git"}: return None
     for pat, k in allow:
@@ -125,7 +135,7 @@ for root, dirs, files in os.walk(stage, followlinks=False):
             skipped.append({"path": os.path.relpath(os.path.join(root, name), stage), "why": "symlink (target not imported): " + os.readlink(os.path.join(root, name))}); dirs.remove(name)
     for name in files:
         full = os.path.join(root, name); rel = os.path.relpath(full, stage).replace(os.sep, "/")
-        if name.startswith("._") or name == ".DS_Store":
+        if any(n.startswith("._") or n == ".DS_Store" for n in rel.split("/")):
             skipped.append({"path": rel, "why": "macOS metadata"}); continue
         st = os.lstat(full)
         if stat.S_ISLNK(st.st_mode):
@@ -137,8 +147,10 @@ for root, dirs, files in os.walk(stage, followlinks=False):
         staged_rels.append(rel)
         if k in ("meta", "overlay"): continue  # used by post_import.py, not copied as-is
         if k == "merge":
-            plan.append({"rel": rel, "kind": k, "src": full, "dest": os.path.join(HOME, rel[len("_home/"):])}); continue
+            plan.append({"rel": rel, "kind": k, "src": full, "dest": claude_global(HOME)}); continue
         dest = dest_of(rel)
+        try: guard_path(dest)
+        except ValueError: die("symlink in destination path")
         data, nrw, nabs = transform(open(full, "rb").read(), rel, k)
         if nabs and k != "dir": warnings.append(f"{rel}: {nabs} absolute path(s) from the other computer remain; check them")
         if os.path.exists(dest):
@@ -174,7 +186,7 @@ if cli == "claude" and ".credentials.json" not in staged_rels and not os.path.ex
     warnings.append("Claude login not copied (default): log in on the box with `claude auth login` (setup-agents headless recipe)")
 if cli == "codex" and "auth.json" not in staged_rels and not os.path.exists(os.path.join(dest_root, "auth.json")):
     warnings.append("Codex login not copied (default): log in on the box with `codex login --device-auth` (setup-agents headless recipe)")
-claude_login = cli == "claude" and any(x["rel"] == ".credentials.json" for x in plan)
+claude_login = cli == "claude" and ".credentials.json" in staged_rels
 if claude_login and not any(x["rel"] == "_home/.claude.json" for x in plan):
     warnings.append("Claude login copied without ~/.claude.json: the account fields (oauthAccount) are missing, so Claude may ask to log in or onboard")
 
@@ -209,7 +221,7 @@ if db_changed:
     b_ok = [c["provider"] for c in box_c or [] if c["enabled"]]
     omp_auth = {"staged": staged_c, "box": box_c, "action": "replace"}
     dead = sorted({c["provider"] for c in staged_c or [] if not c["enabled"]} - set(s_ok))
-    if staged_c is not None and not s_ok and b_ok and not force_auth:
+    if not s_ok and b_ok and not force_auth:
         omp_auth["action"] = "kept_box_login"; db_changed = False
         plan = [x for x in plan if x["rel"] not in DB]
         conflicts = [r for r in conflicts if r not in DB]; out["conflicts"] = conflicts
@@ -280,6 +292,33 @@ def install_deps():
         if not ok: warnings.append(f"{rel}: npm {' then '.join(tried)} failed ({last}); that extension may not load, so run it by hand")
     return res
 
+# Preflight Claude's global merge before any writes (including pending env keys).
+for x in plan[:]:
+    if x["kind"] != "merge": continue
+    dest = x["dest"]
+    try:
+        guard_path(dest)
+        src = json.load(open(x["src"], encoding="utf-8"))
+        cur = json.load(open(dest, encoding="utf-8")) if os.path.exists(dest) else {}
+        if not isinstance(src, dict) or not isinstance(cur, dict): raise ValueError()
+        servers = src.get("mcpServers") or {}
+        existing = cur.get("mcpServers") or {}
+        if not isinstance(servers, dict) or not isinstance(existing, dict): raise ValueError()
+    except (ValueError, OSError): die("unsafe or invalid Claude global configuration")
+    acct = {k: src[k] for k in ("oauthAccount", "hasCompletedOnboarding") if claude_login and k in src}
+    s = json.dumps(servers)
+    for v in home_variants: s = s.replace(json.dumps(v)[1:-1], json.dumps(HOME)[1:-1])
+    servers = json.loads(s)
+    if any(k in existing and existing[k] != v for k, v in servers.items()) or any(k in cur and cur[k] != v for k, v in acct.items()):
+        conflicts.append(x["rel"])
+    before = json.dumps(cur, sort_keys=True)
+    existing.update(servers)
+    if existing: cur["mcpServers"] = existing
+    cur.update(acct)
+    if before == json.dumps(cur, sort_keys=True):
+        plan.remove(x); skipped.append({"path": x["rel"], "why": "identical on box"}); continue
+    x["data"] = json.dumps(cur, indent=2).encode("utf-8"); x["rewrites"] = 0
+
 if conflicts and not overwrite:
     out.update(ok=False, error="existing box files differ; ask the user, then rerun with --overwrite (backs them up)")
     out["planned"] = compact([x["rel"] for x in plan])
@@ -298,7 +337,8 @@ if dry:
     summarize_skipped(); print(json.dumps(out, indent=2)); sys.exit(0)
 
 def backup(dest):
-    b = f"{dest}.bak.{ts}"; shutil.copy2(dest, b); os.chmod(b, 0o600); out["backups"].append(b)
+    fd, b = tempfile.mkstemp(prefix=os.path.basename(dest) + f".bak.{ts}.", dir=os.path.dirname(dest))
+    os.close(fd); shutil.copy2(dest, b); os.chmod(b, 0o600); out["backups"].append(b)
 
 def ensure_dir(d):
     os.makedirs(d, mode=0o700, exist_ok=True)
@@ -308,35 +348,9 @@ def ensure_dir(d):
 if pending_keys:
     out["agent_keys"] = post_import.merge_agent_keys(STAGE_ROOT)
 for x in plan:
-    if x["kind"] == "merge":
-        try: src = json.load(open(x["src"], encoding="utf-8"))
-        except Exception: warnings.append(f"{x['rel']}: not valid JSON, skipped"); continue
-        servers = src.get("mcpServers") or {}
-        acct = {k: src[k] for k in ("oauthAccount", "hasCompletedOnboarding") if claude_login and k in src}
-        if not servers and not acct: skipped.append({"path": x["rel"], "why": "no mcpServers to merge"}); continue
-        s = json.dumps(servers)
-        for v in home_variants: s = s.replace(json.dumps(v)[1:-1], json.dumps(HOME)[1:-1])
-        servers = json.loads(s)
-        if ABS.search(s): warnings.append(".claude.json mcpServers: some server paths point at the other computer; those servers won't start on the box")
-        dest = x["dest"]; cur = {}
-        if os.path.exists(dest):
-            cur = json.load(open(dest, encoding="utf-8")); backup(dest)
-        existing = cur.get("mcpServers") or {}
-        clash = [k for k in servers if k in existing and existing[k] != servers[k]]
-        if clash and not overwrite:
-            warnings.append(f"mcpServers kept as on box (differ, rerun with --overwrite to replace): {clash}")
-            servers = {k: v for k, v in servers.items() if k not in clash}
-        existing.update(servers)
-        if existing: cur["mcpServers"] = existing
-        cur.update(acct)  # account metadata for the copied login (no tokens); never printed
-        tmp = dest + ".tmp"; json.dump(cur, open(tmp, "w", encoding="utf-8"), indent=2); os.chmod(tmp, 0o600); os.replace(tmp, dest)
-        out["installed"].append({"rel": x["rel"], "dest": dest, "merged_mcp_servers": sorted(servers), **({"merged_account_fields": sorted(acct)} if acct else {})})
-        continue
     dest = x["dest"]; ensure_dir(os.path.dirname(dest))
     if os.path.exists(dest): backup(dest)
-    tmp = dest + ".import-tmp"
-    with open(tmp, "wb") as f: f.write(x["data"])
-    os.chmod(tmp, 0o700 if os.stat(x["src"]).st_mode & 0o111 else 0o600); os.replace(tmp, dest)
+    atomic_write(dest, x["data"], 0o700 if x["kind"] not in ("auth", "merge") and os.stat(x["src"]).st_mode & 0o111 else 0o600)
     out["installed"].append({"rel": x["rel"], "kind": x["kind"], "dest": dest, "home_rewrites": x["rewrites"]})
 if db_changed:
     # a box WAL/SHM left beside a replaced agent.db would be replayed into it: back up and remove

@@ -33,7 +33,7 @@ for it in "$@"; do  # validate everything first: fail closed
       r=${it#resolve:*:*:}; p=${r%%=*}; v=${r#*=}
       printf '%s' "$p" | grep -Eq '^[A-Za-z0-9_.@:+-]+$' && printf '%s' "$v" | grep -Eq "$NAME_RE" && ok=1 ;;
   esac
-  [ "$ok" = 1 ] || { printf '{"ok":false,"error":"refused item (not on the allowed list): %s"}\n' "$(printf '%s' "$it" | tr -cd 'A-Za-z0-9_.:=@+-' | cut -c1-80)"; exit 2; }
+  [ "$ok" = 1 ] || { printf '{"ok":false,"error":"refused item (not on the allowed list)"}\n'; exit 2; }
 done
 OUT="$HOME/.agent-import-secrets"
 rm -rf "$OUT"; mkdir -m 700 "$OUT" || { echo '{"ok":false,"error":"cannot create ~/.agent-import-secrets"}'; exit 1; }
@@ -45,8 +45,12 @@ tmo() { # <secs> <out file> cmd...: stdout to the file, killed after <secs>
   ("$@" >"$o" 2>/dev/null </dev/null) &
   p=$!; i=0
   while kill -0 "$p" 2>/dev/null && [ "$i" -lt $((s * 5)) ]; do sleep 0.2; i=$((i + 1)); done
-  kill "$p" 2>/dev/null; wait "$p" 2>/dev/null
+  kill "$p" 2>/dev/null; wait "$p" 2>/dev/null; rc=$?
+  # Failed/terminated helpers may have printed a partial secret. Never export it.
+  [ "$rc" = 0 ] || : >"$o"
+  return "$rc"
 }
+esc() { printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 size() { wc -c <"$1" | tr -d ' '; }
 add_env() { # <NAME> <file holding the value>: append `export NAME='value'` to secrets.env; never echoes the value
   v=$(cat "$2"); rm -f "$2"
@@ -68,7 +72,7 @@ login_value() { # <NAME> <out>: the value from the interactive login shell, betw
   sed -n '/^@@AGENTB@@$/,/^@@AGENTE@@$/p' "$T/raw" 2>/dev/null | sed '1d;$d' >"$2"; rm -f "$T/raw"
 }
 kc_acct() { security find-generic-password -s "$1" 2>/dev/null </dev/null | sed -n 's/^ *"acct"<blob>="\(.*\)"$/\1/p' | head -n 1; }
-is_json() { [ -s "$1" ] && [ "$(tr -d ' \t\r\n' <"$1" | cut -c1)" = "{" ]; }
+is_json() { [ -s "$1" ] && [ "$(js_cmd "$1" __json__ none)" = valid ]; }
 js_cmd() { # <cli> <file> <provider>: prints the provider's command (for sh -c) to stdout, which the caller captures
   cat >"$T/cmd.js" <<'JS'
 var IO = (function () {
@@ -90,6 +94,7 @@ function yamlGet(text, want) { var stack = [], hit = null;
 function run(a) { // a: path kind provider
   var t = IO.read(a[0]), v = null; if (t === null) return "";
   try {
+    if (a[1] === "__json__") { var j = JSON.parse(t); return j && typeof j === "object" && !Array.isArray(j) ? "valid" : ""; }
     if (a[1] === "auth.json") v = (JSON.parse(t)[a[2]] || {}).key;
     else if (a[1] === "models.json") v = ((JSON.parse(t).providers || {})[a[2]] || {}).apiKey;
     else if (a[1] === "models.yml") v = yamlGet(t, ["providers", a[2], "apiKey"]);
@@ -125,12 +130,9 @@ for it in "$@"; do
       h=$( (printf '%s' "$ch" | shasum -a 256 2>/dev/null || printf '%s' "$ch" | sha256sum) | cut -c1-16)
       mkdir -p "$OUT/codex"; f="$OUT/codex/auth.json"
       case "$os" in
-        macos) acct="cli|$h"
-               security find-generic-password -s 'Codex Auth' -a "$acct" >/dev/null 2>&1 </dev/null || acct=$(kc_acct 'Codex Auth')
-               [ -n "$acct" ] && tmo 120 "$f" security find-generic-password -s 'Codex Auth' -a "$acct" -w ;;
+        macos) tmo 120 "$f" security find-generic-password -s 'Codex Auth' -a "cli|$h" -w ;;
         linux) if command -v secret-tool >/dev/null 2>&1; then
                  tmo 60 "$f" secret-tool lookup service 'Codex Auth' username "cli|$h"
-                 [ -s "$f" ] || tmo 60 "$f" secret-tool lookup service 'Codex Auth'
                fi ;;
       esac
       if is_json "$f"; then report "$it" ok "$(size "$f")"; else rm -f "$f"; report "$it" "missing (not found, denied, or not JSON)"; fi ;;
@@ -149,4 +151,4 @@ done
 rm -rf "$T"
 files=$(cd "$OUT" && find . -type f | sed 's#^\./##' | sort | tr '\n' ' ')
 [ -f "$OUT/secrets.env" ] && chmod 600 "$OUT/secrets.env"
-printf '{"ok":true,"dir":"%s","files":"%s","items":[%s],"next":"run bundle_local.sh now: it bundles and then deletes this dir"}\n' "$OUT" "${files% }" "$res"
+printf '{"ok":true,"dir":"%s","files":"%s","items":[%s],"next":"run bundle_local.sh now: it bundles and then deletes this dir"}\n' "$(esc "$OUT")" "${files% }" "$res"
