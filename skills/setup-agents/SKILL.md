@@ -24,7 +24,7 @@ The default path is **import everything from the user's computer**, logins inclu
    its content verbatim as a heredoc, `sh -s -- claude codex pi omp <<'DETECT'` … `DETECT`. It only tests whether
    the `import_plan.py` paths exist (names, never contents) and runs `<cli> --version`. It prints one JSON line:
    `os`, `home`, and per CLI `installed`, `version`, `has_auth`, `importable_auth`, `has_config`, `present`,
-   `symlinks`, `note`. Windows: use `Test-Path` on the `import_plan.py --os windows` paths instead.
+   `symlinks`, `auth_status`, `note`. Windows: use `Test-Path` on the `import_plan.py --os windows` paths instead.
 3. A CLI counts as **found locally** when it has `importable_auth` or `has_config`. Claude on macOS has
    `importable_auth: false` (its login is in the Keychain); its settings can still be imported.
 
@@ -95,6 +95,7 @@ Without a connected computer, or when nothing was found locally, skip this card 
 Say once, before copying: the same login will then be used on two machines. These CLIs refresh OAuth tokens, and a
 refresh on one side can log the other out. If that happens, log in again there.
 1. Install the chosen CLIs that are missing on the box (2-1 table). For omp, ask the user to quit omp on the computer.
+   If detect shows an omp provider `disabled` in `auth_status`, ask them to run `omp`, then `/login` there first.
 2. **Bundle on the computer** (one machine Shell call): pass `../import-agents/scripts/bundle_local.sh` verbatim the same
    way, `sh -s -- <found clis> <<'BUNDLE'` … `BUNDLE`. It tars only the allowlisted paths, dereferenced (symlinked
    skills become real files), into `~/agent-import.tgz` (600), and prints only size, member count and entry names.
@@ -106,7 +107,8 @@ refresh on one side can log the other out. If that happens, log in again there.
    `rm -f /workspace/uploads/agent-import.tgz`.
 5. Per CLI: `bash ../import-agents/scripts/apply_import.sh <cli> --src-home <home> --dry-run`, then without
    `--dry-run`. On exit 4 (conflicts), list the files, ask, and rerun with `--overwrite` (it backs them up). The script
-   records `auth: imported` and model/reasoning `native` when the status check passes.
+   records `auth: imported` and model/reasoning `native` when the status check passes, and installs npm deps for
+   imported Pi extensions. Exit 5: the box kept its own working omp login because the imported one is dead; relay the warning.
 6. **Fallbacks:** CLIs not found locally, and Claude on macOS (settings imported, login in the Keychain), get a
    subscription login on the box (headless recipe below) or an API key. Env-var API keys (e.g. Pi or omp providers
    using `DEEPSEEK_API_KEY`) aren't in these files: ask which env names they use, then have the user enter values through

@@ -85,8 +85,8 @@ def src(os_name, home, cli, rel):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--os", required=True, choices=["macos", "linux", "windows"])
-    ap.add_argument("--home", required=True, help="user's home dir on their computer, e.g. /Users/alice or C:\\Users\\alice")
+    ap.add_argument("--os", required="--lint-scripts" not in sys.argv, choices=["macos", "linux", "windows"])
+    ap.add_argument("--home", required="--lint-scripts" not in sys.argv, help="user's home dir on their computer, e.g. /Users/alice or C:\\Users\\alice")
     ap.add_argument("--cli", default="codex,claude,pi,omp")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--dereference", action="store_true",

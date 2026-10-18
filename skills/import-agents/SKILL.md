@@ -7,14 +7,15 @@ description: Import the user's existing Codex, Claude Code, Pi or omp setup, log
 
 The CLIs must already be installed on the box (`setup-agents` 2-1). Scripts live in `scripts/`:
 - `import_plan.py --os macos|linux|windows --home <user home> --cli <list> [--json]` prints what to copy and where to stage it. It reads nothing.
-- `apply_import.sh <cli> [--src-home <user home>] [--dry-run] [--overwrite] [--keep-stage] [--no-verify]` installs from
-  `/workspace/uploads/agent-import/<cli>/`.
+- `apply_import.sh <cli> [--src-home <user home>] [--dry-run] [--overwrite] [--force-auth] [--keep-stage] [--no-verify]`
+  installs from `/workspace/uploads/agent-import/<cli>/`. Exit 0 ok, 4 conflicts, 5 installed but the box's omp login was kept.
 - `stage_tar.py <bundle.tgz> [--cli <list>]` splits a tarball of home-relative paths into those stage dirs.
   Use it for `bundle_local.sh` / `--dereference` bundles made on the user's computer.
 - `detect_local.sh` and `bundle_local.sh` run **on the user's computer** (macOS/Linux, POSIX sh): Read the file and pass
   its content verbatim to one machine Shell call as a heredoc, `sh -s -- <clis> <<'EOF'` … `EOF`.
   `detect_local.sh` is read-only and prints JSON per CLI (`installed`, `version`, `has_auth`, `importable_auth`,
-  `has_config`, `present` names, `symlinks`, `note`). `bundle_local.sh` tars only the allowlist, dereferenced, into
+  `has_config`, `present` names, `symlinks`, `auth_status`, `note`). For omp it reads only provider names and
+  usable/disabled from a temp copy of `agent.db` (needs `sqlite3`, built into macOS). `bundle_local.sh` tars only the allowlist, dereferenced, into
   `~/agent-import.tgz` (600) and prints size, member count and entry names. `import_plan.py --lint-scripts` checks
   that both cover every allowlisted path.
 
@@ -41,6 +42,8 @@ The CLIs must already be installed on the box (`setup-agents` 2-1). Scripts live
    `python3 scripts/import_plan.py --os <os> --home <home> --cli <chosen>` lists the full allowlist and stage paths.
 4. **Prepare the source.**
    - **omp:** quit omp on the computer first, since `agent.db` is a live SQLite file. Also copy `agent.db-wal` and `agent.db-shm` if present.
+     If detect's `auth_status` shows a provider `disabled`, ask the user to run `omp`, then `/login` on that computer
+     before bundling, then rerun detect.
    - **Claude on macOS:** the login is in the Keychain item `Claude Code-credentials`, not a file, so it can't be copied.
      Import settings only, then run `claude auth login` on the box (setup-agents headless recipe).
    - **Windows:** Claude may also keep it in Credential Manager. If `.credentials.json` is missing, fall back to login.
@@ -50,11 +53,14 @@ The CLIs must already be installed on the box (`setup-agents` 2-1). Scripts live
    Per-file fallback (Windows, or `CODEX_HOME`/`CLAUDE_CONFIG_DIR` set): one `CopyToBox` per file, with `box_path` set
    to the plan's `stage` path; the user approves each copy.
 6. **Dry run.** `bash scripts/apply_import.sh <cli> --src-home <home> --dry-run`. Show the planned files, skipped
-   files and warnings (absolute paths from the other computer, a missing omp WAL file).
+   files and warnings (absolute paths from the other computer, a missing omp WAL file, `planned.npm_deps`, `omp_auth`).
 7. **Apply.** Rerun without `--dry-run` (add `--overwrite` only after the user agrees). The script sets files to 600 and the
    CLI dir to 700, makes backups, rewrites `<home>` to the box home in text config, merges only `mcpServers`
    from Claude's `~/.claude.json`, runs the status check, records `auth: imported` and model/reasoning `native` in
-   `~/.grok-bot-agents/config.json` (only when the check passes), and deletes the staged copies.
+   `~/.grok-bot-agents/config.json` (only when the check passes), and deletes the staged copies. It also runs
+   `npm ci`/`npm install --omit=dev` for imported extensions/skills that have a `package.json` (`deps_installed`).
+   **Exit 5** means everything else was installed, but the box kept its own working omp login because the imported
+   one is dead. Relay the warning: the user runs `omp`, `/login` on their computer. Use `--force-auth` only if they insist.
 8. **Env-var API keys** aren't in these files (for example Pi or omp providers using `DEEPSEEK_API_KEY`). Ask which env
    names they use, then have the user enter values through the masked secret input, or Take over and use the
    `read -rsp` line from `setup-agents` 2-2, into `~/.agent-keys`. Never in chat.
@@ -82,6 +88,13 @@ The CLIs must already be installed on the box (`setup-agents` 2-1). Scripts live
   The OK run then returns `rate_limited`. Retry once with another model the same login can use
   (`omp models <provider>`, `--model <provider>/<id>`) to show the import worked. Suggest
   `configure-agents` to change the default; don't change it silently.
+- **Pi extensions with their own `package.json`** (e.g. `extensions/mermaid-renderer`) arrive without `node_modules`,
+  because bundles exclude it. One missing module (`Cannot find module 'beautiful-mermaid'`) stops Pi from starting at all.
+  `apply_import.sh` installs those deps now. If `deps_installed` has a failure, run npm in that dir by hand or remove the extension.
+- **A dead omp login can sit in the source `agent.db`.** Once the box refreshed a token imported earlier, the computer's
+  copy got `disabled_cause` `refresh_token_reused`. Overwriting replaced a working box login with it. Now detect flags it
+  and `apply_import.sh` keeps the box's `agent.db*` (exit 5). It treats `agent.db` + `-wal` + `-shm` as one unit
+  (logins can sit only in the WAL), and removes a stale box WAL when it replaces the db.
 - **Pi** auto-installs the `npm:` packages from the imported `settings.json` on first start, and they may need a newer Pi.
   Make sure Pi is the `@earendil-works` build on Node ≥ 22.19 (setup-agents).
 - **Model and reasoning:** after a successful import the script sets `agents.<a>.model` and `.reasoning` to

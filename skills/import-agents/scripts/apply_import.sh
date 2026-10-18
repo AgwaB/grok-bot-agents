@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install staged CLI files (copied from the user's computer with CopyToBox) into the box's CLI home.
-#   apply_import.sh <codex|claude|pi|omp> [--src-home /Users/alice] [--dry-run] [--overwrite] [--keep-stage] [--no-verify]
+#   apply_import.sh <codex|claude|pi|omp> [--src-home /Users/alice] [--dry-run] [--overwrite] [--force-auth] [--keep-stage] [--no-verify]
 # Stage: ${AGENT_IMPORT_STAGE:-/workspace/uploads/agent-import}/<cli>/<rel path as in import_plan.py>
 # - Installs only allowlisted paths; anything else (SSH keys, other dotfiles, caches, sessions) is skipped and reported.
 # - Never prints file contents. Rejects symlinks and non-regular files.
@@ -10,6 +10,13 @@
 # - Files 600, dirs 700. Runs the CLI's status check; if it passes, updates ~/.grok-bot-agents/config.json
 #   (enable, auth=imported, model/reasoning=native so the imported settings apply).
 # - Deletes the staged files for that CLI afterwards unless --keep-stage (they contain tokens).
+# - Imported extensions/skills with a package.json but no node_modules (bundles exclude node_modules) get their
+#   npm dependencies installed (npm ci, else npm install; --omit=dev). Reported in "deps_installed"; failures are warnings.
+# - omp: reads only provider/credential_type/disabled state of auth_credentials (never the data column) from temp copies.
+#   If every staged login is disabled (or there is none) while the box agent.db has a working one, agent.db* is NOT
+#   replaced, even with --overwrite (the rest still installs); "omp_auth" explains it and the exit code is 5.
+#   --force-auth replaces it anyway.
+# Exit codes: 0 ok, 2 usage/stage error, 4 conflicts (rerun with --overwrite), 5 installed but box omp login kept.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
@@ -22,9 +29,10 @@ from import_plan import PLAN
 def die(msg, code=2):
     print(json.dumps({"ok": False, "error": msg})); sys.exit(code)
 
-if not args or args[0] not in PLAN: die("usage: apply_import.sh <codex|claude|pi|omp> [--src-home H] [--dry-run] [--overwrite] [--keep-stage] [--no-verify]")
+if not args or args[0] not in PLAN: die("usage: apply_import.sh <codex|claude|pi|omp> [--src-home H] [--dry-run] [--overwrite] [--force-auth] [--keep-stage] [--no-verify]")
 cli = args[0]; opts = args[1:]
 dry, overwrite, keep, noverify = "--dry-run" in opts, "--overwrite" in opts, "--keep-stage" in opts, "--no-verify" in opts
+force_auth = "--force-auth" in opts
 src_home = None
 if "--src-home" in opts:
     i = opts.index("--src-home"); src_home = opts[i + 1] if i + 1 < len(opts) else die("--src-home needs a value")
@@ -78,6 +86,7 @@ def transform(data, rel, kind):
 
 ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 plan, skipped, conflicts, warnings = [], [], [], []
+staged_rels = []  # every allowlisted staged file, installed or identical
 for root, dirs, files in os.walk(stage, followlinks=False):
     for name in dirs[:]:
         if os.path.islink(os.path.join(root, name)):
@@ -93,6 +102,7 @@ for root, dirs, files in os.walk(stage, followlinks=False):
         if st.st_size > MAX: skipped.append({"path": rel, "why": "too large"}); continue
         k = kind_of(rel)
         if not k: skipped.append({"path": rel, "why": "not on the allowlist for " + cli}); continue
+        staged_rels.append(rel)
         if k == "merge":
             plan.append({"rel": rel, "kind": k, "src": full, "dest": os.path.join(HOME, rel[len("_home/"):])}); continue
         dest = os.path.join(dest_root, rel)
@@ -130,13 +140,104 @@ if cli == "omp" and any(x["rel"] == "agent.db" for x in plan) and not any(x["rel
 if cli == "claude" and not any(x["rel"] == ".credentials.json" for x in plan) and not os.path.exists(os.path.join(dest_root, ".credentials.json")):
     warnings.append("no Claude credentials imported (macOS keeps them in Keychain); run `claude auth login` on the box")
 
+# --- omp: don't replace a working box login with a dead one -------------------------------------
+def omp_creds(d):
+    """[{provider, credential_type, enabled}] from <d>/agent.db (+wal/shm), read from a temp copy so nothing is
+    written beside the original. Never selects the data column. None if unreadable, [] if no table/rows."""
+    import sqlite3, tempfile
+    if not os.path.isfile(os.path.join(d, "agent.db")): return None
+    t = tempfile.mkdtemp(prefix="omp-auth-")
+    try:
+        os.chmod(t, 0o700)
+        for n in ("agent.db", "agent.db-wal", "agent.db-shm"):
+            if os.path.isfile(os.path.join(d, n)): shutil.copyfile(os.path.join(d, n), os.path.join(t, n))
+        c = sqlite3.connect(os.path.join(t, "agent.db"))
+        try:
+            if not c.execute("select 1 from sqlite_master where type='table' and name='auth_credentials'").fetchone(): return []
+            rows = c.execute("select provider, credential_type, disabled_cause is null from auth_credentials").fetchall()
+        finally: c.close()
+        return [{"provider": r[0], "credential_type": r[1], "enabled": bool(r[2])} for r in rows]
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+
+omp_auth = None
+DB = ("agent.db", "agent.db-wal", "agent.db-shm")  # one unit: logins may sit only in the WAL
+db_changed = cli == "omp" and any(x["rel"] in DB for x in plan)
+if db_changed:
+    staged_c, box_c = omp_creds(stage), omp_creds(dest_root)
+    s_ok = [c["provider"] for c in staged_c or [] if c["enabled"]]
+    b_ok = [c["provider"] for c in box_c or [] if c["enabled"]]
+    omp_auth = {"staged": staged_c, "box": box_c, "action": "replace"}
+    dead = sorted({c["provider"] for c in staged_c or [] if not c["enabled"]} - set(s_ok))
+    if staged_c is not None and not s_ok and b_ok and not force_auth:
+        omp_auth["action"] = "kept_box_login"; db_changed = False
+        plan = [x for x in plan if x["rel"] not in DB]
+        conflicts = [r for r in conflicts if r not in DB]; out["conflicts"] = conflicts
+        for r in DB:
+            if r in staged_rels: skipped.append({"path": r, "why": "kept the box's working omp login (staged login is disabled or missing)"})
+        warnings.append("omp: the login in the imported agent.db is " + (f"disabled ({', '.join(dead)})" if dead else "missing")
+                        + f", while the box already has a working one ({', '.join(sorted(set(b_ok)))}). Kept the box's agent.db; "
+                        "config files still import. Tell the user to run `omp` then `/login` on their computer. "
+                        "Rerun with --force-auth to replace it anyway.")
+    elif staged_c is not None and not s_ok:
+        warnings.append("omp: the imported agent.db has no working login" + (f" (disabled: {', '.join(dead)})" if dead else "")
+                        + ". After import, log in on the box (`omp` then `/login`), or have the user log in on their computer and re-import.")
+    elif dead:
+        warnings.append(f"omp: some imported logins are disabled: {', '.join(dead)} (others work)")
+
+# --- npm deps for imported extensions/skills (bundles exclude node_modules) ----------------------
+DEP_ROOTS = {"pi": ("extensions", "skills"), "codex": ("skills",), "claude": ("skills",), "omp": ()}[cli]
+dep_dirs = []
+for rel in staged_rels:
+    parts = rel.split("/")
+    if parts[-1] == "package.json" and parts[0] in DEP_ROOTS and len(parts) in (2, 3):
+        d = os.path.join(dest_root, *parts[:-1])
+        if not os.path.isdir(os.path.join(d, "node_modules")): dep_dirs.append("/".join(parts[:-1]))
+
+def has_deps(staged_pkg):
+    try: j = json.load(open(staged_pkg, encoding="utf-8"))
+    except Exception: return True
+    return bool(j.get("dependencies") or j.get("optionalDependencies"))
+dep_dirs = sorted(d for d in set(dep_dirs) if has_deps(os.path.join(stage, d, "package.json")))
+
+def install_deps():
+    res, env = [], dict(os.environ)
+    n22 = os.path.join(HOME, ".local/opt/node22/bin")
+    if os.path.isdir(n22): env["PATH"] = n22 + os.pathsep + env.get("PATH", "")
+    if not shutil.which("npm", path=env["PATH"]):
+        warnings.append(f"npm not found: install deps manually in {dep_dirs}"); return res
+    flags = ["--omit=dev", "--no-audit", "--no-fund"]
+    for rel in dep_dirs:
+        d = os.path.join(dest_root, rel); tried = []
+        if os.path.isdir(os.path.join(d, "node_modules")): continue
+        cmds = ([["npm", "ci"] + flags] if os.path.isfile(os.path.join(d, "package-lock.json")) else []) + [["npm", "install"] + flags]
+        ok = False
+        for c in cmds:
+            try:
+                r = subprocess.run(c, cwd=d, env=env, capture_output=True, text=True, timeout=300)
+                tried.append(c[1]); ok = r.returncode == 0
+                errs = [l for l in (r.stderr or r.stdout).splitlines() if l.strip() and "complete log" not in l and "_logs/" not in l]
+                last = (next((l for l in errs if " code " in l or "404" in l or "ERR" in l), errs[0] if errs else ""))[:200]
+            except Exception as e:
+                tried.append(c[1]); ok = False; last = str(e)[:200]
+            if ok: break
+        res.append({"dir": rel, "ok": ok, "via": tried[-1]})
+        if not ok: warnings.append(f"{rel}: npm {' then '.join(tried)} failed ({last}); that extension may not load, so run it by hand")
+    return res
+
 if conflicts and not overwrite:
     out.update(ok=False, error="existing box files differ; ask the user, then rerun with --overwrite (backs them up)")
-    out["planned"] = compact([x["rel"] for x in plan]); summarize_skipped()
-    print(json.dumps(out, indent=2)); sys.exit(4)
+    out["planned"] = compact([x["rel"] for x in plan])
+    if omp_auth: out["omp_auth"] = omp_auth
+    summarize_skipped(); print(json.dumps(out, indent=2)); sys.exit(4)
 if dry:
     out["planned"] = [{"rel": x["rel"], "kind": x["kind"], "dest": x["dest"], "home_rewrites": x.get("rewrites", 0), "overwrites": x["rel"] in conflicts} for x in plan]
-    out["planned"] = compact(out["planned"]); summarize_skipped(); print(json.dumps(out, indent=2)); sys.exit(0)
+    out["planned"] = compact(out["planned"])
+    if dep_dirs: out["planned"]["npm_deps"] = dep_dirs
+    if omp_auth: out["omp_auth"] = omp_auth
+    summarize_skipped(); print(json.dumps(out, indent=2)); sys.exit(0)
 
 def backup(dest):
     b = f"{dest}.bak.{ts}"; shutil.copy2(dest, b); os.chmod(b, 0o600); out["backups"].append(b)
@@ -174,7 +275,14 @@ for x in plan:
     with open(tmp, "wb") as f: f.write(x["data"])
     os.chmod(tmp, 0o600); os.replace(tmp, dest)
     out["installed"].append({"rel": x["rel"], "kind": x["kind"], "dest": dest, "home_rewrites": x["rewrites"]})
+if db_changed:
+    # a box WAL/SHM left beside a replaced agent.db would be replayed into it: back up and remove
+    for n in DB[1:]:
+        stale = os.path.join(dest_root, n)
+        if os.path.isfile(stale) and n not in staged_rels:
+            backup(stale); os.remove(stale)
 if os.path.isdir(dest_root): os.chmod(dest_root, 0o700)
+if dep_dirs: out["deps_installed"] = install_deps()
 
 if not noverify:
     cmd = p["verify"]
@@ -206,6 +314,8 @@ out["two_machine_warning"] = ("The same login is now used on the box and the use
 
 if not keep:
     shutil.rmtree(stage, ignore_errors=True); out["stage_removed"] = stage
+if omp_auth: out["omp_auth"] = omp_auth
 summarize_skipped(); out["installed"] = compact(out["installed"])
 print(json.dumps(out, indent=2))
+if omp_auth and omp_auth["action"] == "kept_box_login": sys.exit(5)
 PY
