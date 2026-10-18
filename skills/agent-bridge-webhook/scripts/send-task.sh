@@ -7,8 +7,23 @@
 #   GROKBOT_WEBHOOK_KEY=...      header value (only needed when HEADER is just the name)
 # Usage: send-task.sh "task" [context-file]   -> prints the request_id
 #        send-task.sh --check                 -> validates the config without sending
+#        send-task.sh --setup                 -> asks for the URL and header (hidden), writes the config (600), checks it
 set -euo pipefail
 CONF="${GROK_BRIDGE_CONF:-$HOME/.config/grok-agents/bridge.env}"
+if [ "${1:-}" = "--setup" ]; then
+  echo "Paste the values from the Agent bridge routine panel."
+  read -rp "Webhook URL: " s_url
+  read -rsp "Authorization header (whole line or just the key; input hidden): " s_hdr; echo
+  [ -n "$s_url" ] && [ -n "$s_hdr" ] || { echo "both values are required" >&2; exit 2; }
+  case "$s_hdr" in *:*) ;; *) s_hdr="Authorization: $s_hdr" ;; esac
+  mkdir -p "$(dirname "$CONF")"; chmod 700 "$(dirname "$CONF")" 2>/dev/null || true
+  [ -f "$CONF" ] && cp -p "$CONF" "$CONF.bak.$(date +%Y%m%d-%H%M%S)"
+  tmp=$(mktemp "$CONF.XXXXXX"); chmod 600 "$tmp"
+  printf '# written by grok-send-task --setup\nGROKBOT_WEBHOOK_URL=%s\nGROKBOT_WEBHOOK_HEADER=%s\n' "$s_url" "$s_hdr" > "$tmp"
+  mv "$tmp" "$CONF"; unset s_hdr
+  echo "saved $CONF (600)"
+  exec "$0" --check
+fi
 if [ -f "$CONF" ]; then
   perm=$(stat -c %a "$CONF" 2>/dev/null || stat -f %Lp "$CONF")
   [ "$perm" = 600 ] || { echo "refusing $CONF: chmod 600 it first" >&2; exit 1; }

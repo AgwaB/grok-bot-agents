@@ -62,9 +62,11 @@ Install on the caller machine:
 ```bash
 mkdir -p ~/.config/grok-agents ~/.local/bin
 cp scripts/send-task.sh ~/.local/bin/grok-send-task && chmod 755 ~/.local/bin/grok-send-task
-cp scripts/bridge.env.example ~/.config/grok-agents/bridge.env && chmod 600 ~/.config/grok-agents/bridge.env
-# then fill the three values from the routine panel
+grok-send-task --setup   # asks for the Webhook URL and the Authorization header (hidden), writes bridge.env (600), checks it
 ```
+Then `grok-send-task "Reply with exactly: BRIDGE OK"` as a round-trip test. `grok-send-task --check` validates the config
+without sending. Manual edits are fine too: the file is parsed, not sourced, so quotes and spaces in pasted values are OK, and
+`GROKBOT_WEBHOOK_HEADER` may hold the whole `Authorization: Bearer ...` line.
 
 Getting results back without exposing the local machine:
 - **git outbox**: the bot commits outbox files to a private repo and the local agent pulls them. Community
