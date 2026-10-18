@@ -66,8 +66,8 @@ for c in "$@"; do
     [ -f "$d/agent.db-shm" ] && add "agent.db-shm"
     pgrep -x omp >/dev/null 2>&1 && note="omp is running: quit it before copying agent.db"
   fi
-  case "$c" in codex) [ -n "${CODEX_HOME:-}" ] && note="CODEX_HOME is set: copy per file, not with bundle_local.sh" ;;
-               claude) [ -n "${CLAUDE_CONFIG_DIR:-}" ] && note="CLAUDE_CONFIG_DIR is set: copy per file, not with bundle_local.sh" ;; esac
+  case "$c" in codex) [ -n "${CODEX_HOME:-}" ] && [ "${CODEX_HOME%/}" != "$HOME/.codex" ] && note="CODEX_HOME is set: copy per file, not with bundle_local.sh" ;;
+               claude) [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ "${CLAUDE_CONFIG_DIR%/}" != "$HOME/.claude" ] && note="CLAUDE_CONFIG_DIR is set: copy per file, not with bundle_local.sh" ;; esac
   [ "$first" = 1 ] || printf ','
   first=0
   printf '"%s":{"installed":%s,"version":"%s","dir":"%s","has_auth":%s,"importable_auth":%s,"has_config":%s,"present":[%s],"symlinks":%s,"note":"%s"}' \
