@@ -4,6 +4,34 @@
 
 First release.
 
+- Import regression coverage (still **0.1.0**): research on eight open-source
+  projects, a 64-scenario matrix, and an isolated offline runner
+  (`tests/run_import_tests.sh`). 60 Python tests (59 passed, PowerShell skipped
+  when unavailable) plus 26 existing Bash auth checks; random canaries guard both
+  output streams, all homes are temporary, and CLIs/stores/installers are stubbed.
+- Import safety/correctness fixes from the matrix:
+  - `bundle_local.sh`: parse Codex auth before choosing the static-key default;
+    fail closed on unknown formats, respect directory deselections and overrides,
+    exclude forbidden symlink targets, and retain exports after tar failure.
+  - `export_secrets.sh`: reject failed/partial/malformed store and indirection
+    results; never fall back to an arbitrary Codex keyring account.
+  - `stage_tar.py` / `import_safety.py`: reject traversal, links, special files,
+    unsafe package roots and symlink destinations; bound extraction and write
+    through unique private temporary files.
+  - `apply_import.sh`: preflight conflicts before merging secrets, preserve working
+    omp auth on corrupt/disabled imports, guard database sidecars/auxiliary paths,
+    keep distinct backups, merge identical Claude login metadata, and initialize
+    or update central config only after successful verification (including identical
+    auth on a retry after `--no-verify`).
+  - `post_import.py`: literal-only key merges, idempotent top-level Codex store
+    pinning/MCP disabling, guarded atomic npm overlays, spaced Pi venv roots and
+    quoted Claude hook/status-line paths; suppress raw helper/parser diagnostics.
+  - `detect_local.sh` / `detect_local.ps1` / `parity_check.py`: honor relocated
+    configs, sanitize version/status output, aggregate omp enabled rows correctly,
+    and make `--no-run` parity avoid invoking Pi.
+  Native Windows/macOS stores/ACLs, real refresh/installers and concurrent imports
+  remain explicitly unverified; see `TESTING.md` and `tests/MATRIX.md`.
+
 - `setup-agents`: multi-select install of Claude Code, Codex CLI, Pi and omp; subscription sign-in,
   masked API keys in `~/.agent-keys`, or import; native model/reasoning by default; OK test per CLI.
 - `import-agents`: allowlisted import of CLI logins and settings from a registered computer
