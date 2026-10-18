@@ -113,6 +113,21 @@ Symlinked skill folders are bundled with `import_plan.py --dereference` (a `tar 
 staged with `stage_tar.py`. Sessions, history, logs, caches, SSH keys and unrelated dotfiles are never
 imported. Sharing one OAuth login across two machines can log one of them out when the token refreshes.
 
+## Answers back in your terminal (Tailscale)
+
+`grok-send-task --wait "task"` on your Mac (or inside Claude Code / Codex) streams progress and prints the answer in the
+same terminal, over your tailnet. The bot sets it all up: `setup-tailscale.sh` installs Tailscale on the box (no root,
+sha256-checked static build), starts it in userspace mode, and prints a login link. You approve that link, the bot waits
+(`--wait-login`), then hands the return-channel token to your machine without showing it in chat. Your machine needs
+Tailscale on the same account; `grok-send-task --check` tells you if it's missing (`brew install --cask tailscale`).
+
+```bash
+setup-tailscale.sh                 # install/start/login if needed → STATUS=ready | needs_login (+ LOGIN_URL=…)
+setup-tailscale.sh --wait-login    # block until the login is approved (default 300 s)
+setup-tailscale.sh --status        # TAILNET_IP, DNS_NAME, RESULT_URL, STATUS
+setup-tailscale.sh --uninstall [--purge] [--dry-run]
+```
+
 ## Layout
 
 ```
@@ -124,7 +139,7 @@ skills/
   import-agents/       SKILL.md, scripts/{import_plan.py, stage_tar.py, apply_import.sh}
   configure-agents/    SKILL.md, scripts/agents_config.py
   delegate-task/       SKILL.md, scripts/{run-agent.sh, route.py, summarize_run.py}, references/
-  agent-bridge-webhook/ SKILL.md, scripts/{bridge.py, bridge_server.py, bridge-serve.sh, sanitize_result.py, send-task.sh, bridge.env.example}
+  agent-bridge-webhook/ SKILL.md, scripts/{bridge.py, bridge_server.py, bridge-serve.sh, setup-tailscale.sh, sanitize_result.py, send-task.sh, bridge.env.example}
 ```
 
 ## Testing and release

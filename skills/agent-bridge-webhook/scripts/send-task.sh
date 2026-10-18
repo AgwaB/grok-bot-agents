@@ -97,6 +97,41 @@ fi
 case "$TIMEOUT" in ''|*[!0-9]*) echo "--timeout needs seconds" >&2; exit 2 ;; esac
 [ "$CHECK" = 1 ] || [ -n "$TASK" ] || [ -n "$FETCH" ] || { echo 'usage: grok-send-task [--wait] "task" [context-file] | --fetch ID | --check | --setup  (--help)' >&2; exit 2; }
 
+# --check: is Tailscale installed and up on this machine, and does the box answer over the tailnet? Hints only, never fatal.
+ts_check() {
+  local ts="" url host os
+  os=$(uname -s)
+  if command -v tailscale >/dev/null 2>&1; then ts=tailscale
+  elif [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]; then ts=/Applications/Tailscale.app/Contents/MacOS/Tailscale
+  fi
+  url="${GROKBOT_RESULT_URL:-}"
+  [ -z "$url" ] && [ -f "$CONF" ] && url=$(sed -n 's/^[[:space:]]*\(export[[:space:]]*\)\{0,1\}GROKBOT_RESULT_URL[[:space:]]*=[[:space:]]*//p' "$CONF" | head -n1 | tr -d "\"'")
+  if [ -z "$ts" ]; then
+    if [ "$os" = Darwin ]; then
+      echo "tailscale: not installed. For --wait answers: brew install --cask tailscale (or Tailscale from the Mac App Store), then sign in with the same account as the box" >&2
+    else
+      echo "tailscale: not installed. For --wait answers: see https://tailscale.com/download/linux, then sign in with the same account as the box" >&2
+    fi
+    return 0
+  fi
+  if ! "$ts" status >/dev/null 2>&1; then
+    if [ "$os" = Darwin ]; then
+      echo "tailscale: installed but not connected. Open the Tailscale app and sign in / turn it on (same account as the box)" >&2
+    else
+      echo "tailscale: installed but not connected. Run: sudo tailscale up (same account as the box)" >&2
+    fi
+    return 0
+  fi
+  [ -n "$url" ] || { echo "tailscale: connected" >&2; return 0; }
+  host=${url#*://}; host=${host%%/*}; host=${host%:*}
+  if "$ts" ping -c 1 --timeout 5s "$host" >/dev/null 2>&1; then
+    echo "tailscale: connected, box $host reachable" >&2
+  else
+    echo "tailscale: connected, but box $host doesn't answer. Is it on this tailnet? (ask the bot to run setup-tailscale.sh --status)" >&2
+  fi
+}
+[ "$CHECK" = 1 ] && ts_check
+
 if [ -f "$CONF" ]; then
   perm=$(stat -c %a "$CONF" 2>/dev/null || stat -f %Lp "$CONF")
   [ "$perm" = 600 ] || { echo "refusing $CONF: chmod 600 it first" >&2; exit 1; }

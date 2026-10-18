@@ -103,7 +103,8 @@ Box side (all in `scripts/`):
   `GET /events/<id>` (SSE: `state`, `progress`, then one `result`; resumable with `?from=<last id>`).
   Ids use the same regex as `bridge.py`; it only reads `inbox/`, `outbox/`, `progress/` under the bridge root
   and never follows symlinks.
-- `bridge-serve.sh start|status|stop`: idempotent keep-alive for tailscaled (userspace, same flags,
+- `setup-tailscale.sh`: installs, starts and logs in Tailscale on the box (see guided setup below).
+- `bridge-serve.sh start|status|stop|ts-start|ts-stop`: idempotent keep-alive for tailscaled (userspace,
   state in `~/.local/state/tailscale`) and the server. Logs in `~/.local/state/grok-bot-agents/`.
   `bridge.py intake` also calls it, and a guarded line in `~/.bashrc` starts it with each shell, so
   after a box restart the first webhook run or shell brings it back. tailscaled keeps its login.
@@ -117,12 +118,22 @@ reported a non-ok status, 2 usage/config, 4 timeout (the task keeps running; `--
 5 token rejected. `--no-stream` uses long-polling instead of SSE, and it falls back to that by itself
 when streaming fails.
 
-**Guided setup (bot does it; the token never appears in chat):**
-1. Tailscale on the box: if `tailscale status` fails, install the static binaries to `~/.local/bin`,
-   run `bridge-serve.sh start`, then `tailscale --socket ~/.local/state/tailscale/tailscaled.sock up --hostname grokbot-box`
-   and send the user the login link it prints. The caller machine must be on the same tailnet.
-2. `bridge-serve.sh start && bridge-serve.sh status` and note the tailnet IP.
-3. `python3 scripts/bridge_server.py client-env /workspace/.grok-result.env --url http://<tailnet IP>:8787` (600),
+**Guided setup (bot does it; the user only approves the Tailscale login; the token never appears in chat):**
+1. **Tailscale on the box:** `bash scripts/setup-tailscale.sh` (no root, idempotent). It installs the latest stable
+   static build from pkgs.tailscale.com (sha256 checked) into `~/.local/opt` + `~/.local/bin` if missing, starts
+   tailscaled through `bridge-serve.sh` (userspace, SOCKS5 localhost:1055, state `~/.local/state/tailscale`), adds the
+   guarded `~/.bashrc` keep-alive line, starts the bridge server and prints `KEY=value` lines ending in `STATUS=…`.
+   - `STATUS=ready` (exit 0): note `TAILNET_IP` / `RESULT_URL` and go to step 2. An existing login is reused, never redone.
+   - `STATUS=needs_login` (exit 3) with `LOGIN_URL=…`: send the user that link in one short line ("이 링크 열어서 Tailscale
+     로그인 승인해 주세요. 맥과 같은 계정으로요"). Then run `bash scripts/setup-tailscale.sh --wait-login 300`
+     (blocks until approved; exit 4 on timeout: resend the link and run it again). It ends with `STATUS=ready`.
+   - Options: `--hostname NAME` (default `grokbot-box`), `--upgrade`, `--authkey-env VAR` (log in with an auth key from
+     that env var, passed as a 600 temp file, never printed), `--status`, `--uninstall [--purge] [--dry-run]`.
+   - The caller machine must be on the same tailnet. `grok-send-task --check` there says whether Tailscale is
+     installed, connected and can reach the box, with an install hint if not (macOS: `brew install --cask tailscale`
+     or the App Store).
+2. `bridge-serve.sh status` confirms tailscaled, the server and the tailnet IP (setup already started both).
+3. `python3 scripts/bridge_server.py client-env /workspace/.grok-result.env --url <RESULT_URL>` (600),
    CopyFromBox it to the caller's `~/.config/grok-bot-agents/result.env`, run
    `grok-send-task --import-result-env ~/.config/grok-bot-agents/result.env` there (it merges into the
    active `bridge.env` with a backup, deletes the file, and runs `--check`), then `rm /workspace/.grok-result.env` on the box.

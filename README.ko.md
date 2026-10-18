@@ -41,7 +41,7 @@ grok-bot-agents/
     │   └── references/{codex,claude-code,pi,omp}.md
     └── agent-bridge-webhook/
         ├── SKILL.md
-        └── scripts/bridge.py, bridge_server.py, bridge-serve.sh, sanitize_result.py, send-task.sh, bridge.env.example
+        └── scripts/bridge.py, bridge_server.py, bridge-serve.sh, setup-tailscale.sh, sanitize_result.py, send-task.sh, bridge.env.example
 ```
 
 ## 가벼운 일과 무거운 일
@@ -78,6 +78,20 @@ grok-bot-agents/
 
 세션, 히스토리, 로그, 캐시와 SSH 키 등 관련 없는 dotfile은 가져오지 않습니다. env 변수로 쓰던 API 키는 따로 마스킹 입력으로 `~/.agent-keys`에 넣습니다.
 같은 로그인을 두 컴퓨터에서 쓰게 되면, OAuth 토큰이 갱신될 때 한쪽이 로그아웃될 수 있습니다. 그때는 그쪽에서 다시 로그인합니다.
+
+## 답을 내 터미널로 받기 (Tailscale)
+
+맥이나 Claude Code·Codex 안에서 `grok-send-task --wait "할 일"`을 실행하면 진행 상황과 답이 그 터미널로 돌아와요(테일넷 경유).
+세팅은 봇이 다 해요. `setup-tailscale.sh`가 봇 컴퓨터에 Tailscale을 설치(root 불필요, sha256 검증)하고 실행한 뒤 로그인
+링크를 줘요. 성재님은 링크만 승인하면 되고, 봇이 `--wait-login`으로 기다렸다가 결과 통로 토큰을 채팅에 노출하지 않고 맥에
+넣어요. 맥에도 같은 계정의 Tailscale이 있어야 해요. 없으면 `grok-send-task --check`가 알려줘요(`brew install --cask tailscale`).
+
+| 명령 | 하는 일 |
+|---|---|
+| `setup-tailscale.sh` | 필요하면 설치·실행·로그인 → `STATUS=ready` 또는 `needs_login` + `LOGIN_URL=…` |
+| `setup-tailscale.sh --wait-login [초]` | 로그인 승인까지 대기 (기본 300초) |
+| `setup-tailscale.sh --status` | `TAILNET_IP`, `DNS_NAME`, `RESULT_URL`, `STATUS` |
+| `setup-tailscale.sh --uninstall [--purge] [--dry-run]` | 중지·삭제 (`--purge`면 로그인 상태도 삭제) |
 
 ## 실행 격리
 

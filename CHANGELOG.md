@@ -18,6 +18,8 @@ First release.
   logging, `sanitize_result.py`, and a macOS/Linux `send-task.sh` sender. Tailscale return channel:
   `bridge_server.py` (token-auth long-poll + SSE), `bridge.py progress`, `bridge-serve.sh` keep-alive,
   `grok-send-task --wait/--fetch` streams progress and prints the answer in the caller's terminal.
+  `setup-tailscale.sh` installs (sha256-checked static build, no root), starts and logs in Tailscale on the
+  box; the user only approves the printed `LOGIN_URL`. `grok-send-task --check` checks Tailscale on the caller.
 - Named `grok-bot-agents` (was `grok-agents` during development). Scripts still read the legacy
   `~/.grok-agents/config.json`, `$GROK_AGENTS_CONFIG`, `$GROK_AGENTS_STATE` and
   `~/.config/grok-agents/bridge.env` when the new ones are absent.
