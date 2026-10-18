@@ -123,11 +123,22 @@ ts_check() {
     return 0
   fi
   [ -n "$url" ] || { echo "tailscale: connected" >&2; return 0; }
+  url=${url%/}
+  # source of truth: the return channel's own /healthz (no auth, no proxy)
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fsS --noproxy '*' -m 8 "$url/healthz" >/dev/null 2>&1; then
+      echo "tailscale: connected, box reachable ($url)" >&2
+    else
+      echo "tailscale: connected, but $url/healthz doesn't answer. Box on this tailnet and its server running? (ask the bot to run setup-tailscale.sh --status)" >&2
+    fi
+    return 0
+  fi
+  # no curl: Tailscale-layer ping as a rough check (the app-bundled CLI can be slow)
   host=${url#*://}; host=${host%%/*}; host=${host%:*}
-  if "$ts" ping -c 1 --timeout 5s "$host" >/dev/null 2>&1; then
-    echo "tailscale: connected, box $host reachable" >&2
+  if "$ts" ping --c 3 --timeout 10s "$host" >/dev/null 2>&1; then
+    echo "tailscale: connected, box $host answers tailscale ping" >&2
   else
-    echo "tailscale: connected, but box $host doesn't answer. Is it on this tailnet? (ask the bot to run setup-tailscale.sh --status)" >&2
+    echo "tailscale: connected; tailscale ping to $host got no answer (the return-channel check below is authoritative)" >&2
   fi
 }
 [ "$CHECK" = 1 ] && ts_check
