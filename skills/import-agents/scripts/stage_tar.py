@@ -4,7 +4,9 @@
   stage_tar.py <bundle.tgz> [--stage /workspace/uploads/agent-import] [--cli codex,claude,pi,omp]
 
 Member mapping: .codex/* -> codex/*, .claude/* -> claude/*, .claude.json -> claude/_home/.claude.json,
-.pi/agent/* -> pi/*, .omp/agent/* -> omp/*. Anything else is skipped.
+.pi/agent/* -> pi/*, .omp/agent/* -> omp/*. bundle_local.sh's .agent-import-manifest.txt -> _meta/manifest.txt;
+its `home <dir>` roots (Pi packages outside ~/.pi/agent) -> pi/_home/<dir>/*. Anything else is skipped.
+Executable bits are kept (700), other files are 600.
 Skips macOS metadata (._*, .DS_Store), *.pyc, symlinks/hardlinks/devices, absolute paths and '..'.
 Never prints file contents. Stage dirs are created 700. Then run apply_import.sh per CLI.
 """
@@ -12,6 +14,7 @@ import argparse, json, os, sys, tarfile
 
 MAP = [(".codex/", "codex/"), (".claude.json", "claude/_home/.claude.json"), (".claude/", "claude/"),
        (".pi/agent/", "pi/"), (".omp/agent/", "omp/")]
+MANIFEST = ".agent-import-manifest.txt"
 
 def target(name):
     for pre, dst in MAP:
@@ -28,8 +31,25 @@ def main():
     counts, skipped = {}, {}
     def skip(why): skipped[why] = skipped.get(why, 0) + 1
     with tarfile.open(a.bundle, "r:*") as tf:
+        roots = []
+        try:
+            mf = tf.getmember(MANIFEST)
+            text = tf.extractfile(mf).read().decode("utf-8", "replace") if mf.isreg() else ""
+        except KeyError:
+            text = ""
+        if text:
+            os.makedirs(os.path.join(a.stage, "_meta"), mode=0o700, exist_ok=True)
+            mp = os.path.join(a.stage, "_meta", "manifest.txt")
+            with open(mp, "w", encoding="utf-8") as f: f.write(text)
+            os.chmod(mp, 0o600)
+            for line in text.splitlines():
+                parts = line.split(" ", 1)
+                if parts[0] == "home" and len(parts) == 2:
+                    r = parts[1].strip().strip("/")
+                    if r and not r.startswith("/") and ".." not in r.split("/"): roots.append(r + "/")
         for m in tf:
-            name = m.name.lstrip("./") if m.name.startswith("./") else m.name
+            if (m.name[2:] if m.name.startswith("./") else m.name) == MANIFEST: continue
+            name = m.name[2:] if m.name.startswith("./") else m.name
             base = os.path.basename(name.rstrip("/"))
             if m.isdir(): continue
             if name.startswith("/") or ".." in name.split("/"): skip("unsafe path"); continue
@@ -37,12 +57,14 @@ def main():
             if base.endswith(".pyc") or "/__pycache__/" in "/" + name: skip("pyc"); continue
             if not m.isreg(): skip("link or special file"); continue
             t = target(name)
+            if not t and "pi" in clis:
+                t = next(("pi/_home/" + name for r in roots if name.startswith(r)), None)
             if not t or t.split("/")[0] not in clis: skip("not a CLI path"); continue
             dest = os.path.join(a.stage, t)
             os.makedirs(os.path.dirname(dest), mode=0o700, exist_ok=True)
             src = tf.extractfile(m)
             with open(dest, "wb") as f: f.write(src.read())
-            os.chmod(dest, 0o600)
+            os.chmod(dest, 0o700 if m.mode & 0o111 else 0o600)
             c = t.split("/")[0]; counts[c] = counts.get(c, 0) + 1
     print(json.dumps({"ok": True, "stage": a.stage, "staged_files": counts, "skipped": skipped}, indent=2))
 

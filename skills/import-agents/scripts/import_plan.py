@@ -4,7 +4,8 @@
   import_plan.py --os macos|linux|windows --home /Users/alice [--cli codex,claude,pi,omp] [--json]
 
 Each entry: source path on the user's computer -> staging path on the box
-(/workspace/uploads/agent-import/<cli>/<rel>), plus kind (auth|config|extra|dir|merge), and notes.
+(/workspace/uploads/agent-import/<cli>/<rel>), plus kind (auth|config|extra|dir|merge|meta|package|overlay), and notes.
+meta: staged for the post-install steps, not copied as-is. package/overlay: code, installed without path rewrites.
 Copy only what exists (check with `test -e` / `Test-Path` on the user's machine first).
 """
 import argparse, json, re, sys
@@ -21,6 +22,7 @@ PLAN = {
             ("AGENTS.md", "extra", "Global instructions."),
             ("prompts/", "dir", "Custom slash prompts (*.md)."),
             ("skills/", "dir", "User skills, if any."),
+            ("rules/", "dir", "Exec-policy rules (*.rules), if any."),
         ],
         "skip": ["sessions/", "log/", "history.jsonl", "*.sqlite*", "cache/", "tmp/", "shell_snapshots/"],
         "verify": "codex login status",
@@ -34,6 +36,8 @@ PLAN = {
             ("agents/", "dir", "Subagents."),
             ("commands/", "dir", "Slash commands."),
             ("skills/", "dir", "User skills."),
+            ("hooks/", "dir", "Hook scripts that settings.json hooks call (e.g. ~/.claude/hooks/x.sh)."),
+            ("plugins/installed_plugins.json", "meta", "Installed plugin versions and git SHAs. Not copied as-is: used to reinstall the enabledPlugins on the box and pin them to the same commit."),
             ("../.claude.json", "merge", "Global state. Only the `mcpServers` key gets merged into the box's ~/.claude.json. Projects, history and account fields are ignored."),
         ],
         "skip": ["projects/", "sessions/", "history.jsonl", "todos/", "shell-snapshots/", "statsig/", "ide/", "backups/", "file-history/", "plans/", "plugins/cache/", "logs/", "debug/"],
@@ -50,6 +54,20 @@ PLAN = {
             ("prompts/", "dir", "Prompt templates, if present."),
             ("skills/", "dir", "Skills, if present."),
             ("extensions/", "dir", "Extensions, if present."),
+            ("themes/", "dir", "Themes (settings.json `theme`)."),
+            ("agents/", "dir", "Subagent definitions (pi-subagent and similar packages)."),
+            ("workflows/", "dir", "Workflow definitions (pi-workflow packages)."),
+            ("workflow-profiles/", "dir", "Workflow profiles."),
+            ("memory/", "dir", "Saved memories (piMemory)."),
+            ("hud.json", "config", "HUD/status settings used by UI packages."),
+            (".pi-lens.json", "config", "pi-lens settings."),
+            ("trust.json", "config", "Trusted project dirs (home paths are rewritten)."),
+            ("web-search.json", "auth", "pi-web-access settings; holds search API keys (e.g. exaApiKey). Never print it."),
+            ("anthropic-auth-state.json", "auth", "Account state of @cortexkit/pi-anthropic-auth."),
+            ("anthropic-auth-routing-state.json", "auth", "Routing state of @cortexkit/pi-anthropic-auth."),
+            ("packages/", "package", "Local Pi packages listed in settings.json `packages` (no node_modules/.venv/.git); deps reinstalled on the box."),
+            ("npm/node_modules/", "overlay", "Files of the npm packages Pi installed on the computer (no nested node_modules). Laid over the same versions on the box, so local patches survive."),
+            ("_home/", "package", "Local Pi packages outside ~/.pi/agent but under the home dir (e.g. ~/pi/my-ext), from the bundle manifest."),
         ],
         "skip": ["sessions/", "oauth.json (legacy; pi migrates it into auth.json)", "bin/", "logs/"],
         "verify": "pi --list-models",
@@ -100,7 +118,9 @@ def main():
         for script in ("detect_local.sh", "bundle_local.sh"):
             text = open(os.path.join(here, script), encoding="utf-8").read()
             for c, p in PLAN.items():
-                for rel, _, _ in p["files"]:
+                for rel, kind, _ in p["files"]:
+                    if rel == "_home/": continue  # bundle manifest roots, not a fixed path
+                    if script == "detect_local.sh" and kind in ("meta", "package", "overlay"): continue
                     name = ".claude.json" if rel.startswith("../") else rel.rstrip("/")
                     if not re.search(r"(?<![\w.-])" + re.escape(name) + r"(?![\w-])", text): bad.append(f"{script}: {c} {rel}")
         print("\n".join(bad) if bad else "scripts cover every PLAN path"); sys.exit(1 if bad else 0)
@@ -114,6 +134,9 @@ def main():
             if c == "claude" and rel == ".credentials.json" and a.os == "macos":
                 items.append({"rel": rel, "kind": "auth", "source": None, "stage": None,
                               "note": "macOS: stored in Keychain item 'Claude Code-credentials', not a file. Can't copy it; use `claude auth login` on the box instead."})
+                continue
+            if rel == "_home/":
+                items.append({"rel": rel, "kind": kind, "source": f"{a.home}/<package dir from settings.json>", "stage": f"{STAGE}/{c}/_home/<path under home>", "note": note})
                 continue
             stage_rel = rel[3:] if rel.startswith("../") else rel
             items.append({"rel": rel, "kind": kind, "source": src(a.os, a.home, c, rel),

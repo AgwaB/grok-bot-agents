@@ -11,12 +11,22 @@ The CLIs must already be installed on the box (`setup-agents` 2-1). Scripts live
   installs from `/workspace/uploads/agent-import/<cli>/`. Exit 0 ok, 4 conflicts, 5 installed but the box's omp login was kept.
 - `stage_tar.py <bundle.tgz> [--cli <list>]` splits a tarball of home-relative paths into those stage dirs.
   Use it for `bundle_local.sh` / `--dereference` bundles made on the user's computer.
+- `post_import.py` (run by `apply_import.sh`, not by hand) makes the import run like on the computer: Pi `npm:`
+  packages, npm overlay, package venvs; Claude marketplaces + enabledPlugins pinned to the computer's SHA, hook /
+  statusLine tool paths; Codex Mac-only MCP servers and `notify` disabled; MCP server binaries the computer had as
+  `uv tool`s; a box CLI older than the computer's is flagged.
+- `parity_check.py [--cli <list>] [--no-run]` is read-only: does everything each CLI's config points at exist on
+  the box? JSON gaps with impact `breaking` / `degraded` / `cosmetic`; exit 1 on a breaking gap. `apply_import.sh`
+  runs it per CLI (`parity`).
 - `detect_local.sh` and `bundle_local.sh` run **on the user's computer** (macOS/Linux, POSIX sh): Read the file and pass
   its content verbatim to one machine Shell call as a heredoc, `sh -s -- <clis> <<'EOF'` … `EOF`.
   `detect_local.sh` is read-only and prints JSON per CLI (`installed`, `version`, `has_auth`, `importable_auth`,
   `has_config`, `present` names, `symlinks`, `auth_status`, `note`). For omp it reads only provider names and
   usable/disabled from a temp copy of `agent.db` (needs `sqlite3`, built into macOS). `bundle_local.sh` tars only the allowlist, dereferenced, into
-  `~/agent-import.tgz` (600) and prints size, member count and entry names. `import_plan.py --lint-scripts` checks
+  `~/agent-import.tgz` (600) and prints size, member count and entry names. For Pi it also takes the packages
+  `settings.json` `packages` points at: local ones (git-tracked files of a repo, else all but `node_modules`/`.venv`/`.git`),
+  wherever they live under the home dir, and the files of the `npm:` ones Pi installed (local patches included). A
+  manifest in the bundle records package roots outside `~/.pi/agent`, venv pins, `uv tool` pins and CLI versions. `import_plan.py --lint-scripts` checks
   that both cover every allowlisted path.
 
 ## Rules
@@ -24,7 +34,8 @@ The CLIs must already be installed on the box (`setup-agents` 2-1). Scripts live
 - Copy only what `import_plan.py` lists. Never copy SSH or GPG keys, cloud credentials (`~/.aws`, `~/.netrc`,
   `~/.git-credentials`), browser profiles or other dotfiles, even if asked in passing. `apply_import.sh` skips
   anything off its allowlist, plus sessions, history, logs and caches.
-- Never `cat`, `Read`, print or summarize auth files (`auth.json`, `.credentials.json`, `agent.db`) or `~/.agent-keys`.
+- Never `cat`, `Read`, print or summarize auth files (`auth.json`, `.credentials.json`, `agent.db`, Pi's
+  `web-search.json` and `anthropic-auth*.json`) or `~/.agent-keys`.
   Report only names, sizes and the script's JSON.
 - Don't overwrite box config silently. If `apply_import.sh` exits 4 (conflicts), list the files, ask, then rerun
   with `--overwrite`, which saves `<file>.bak.<timestamp>` first.
@@ -58,7 +69,9 @@ The CLIs must already be installed on the box (`setup-agents` 2-1). Scripts live
    CLI dir to 700, makes backups, rewrites `<home>` to the box home in text config, merges only `mcpServers`
    from Claude's `~/.claude.json`, runs the status check, records `auth: imported` and model/reasoning `native` in
    `~/.grok-bot-agents/config.json` (only when the check passes), and deletes the staged copies. It also runs
-   `npm ci`/`npm install --omit=dev` for imported extensions/skills that have a `package.json` (`deps_installed`).
+   `npm ci`/`npm install --omit=dev` for imported extensions/skills that have a `package.json`, and a full `npm ci`
+   for Pi packages (`deps_installed`). Then `post_import.py` (`post_install`) and `parity_check.py` (`parity`) run.
+   Relay `parity` gaps that are `breaking` or `degraded`, plus the `post_install.version` warning if the box CLI is older.
    **Exit 5** means everything else was installed, but the box kept its own working omp login because the imported
    one is dead. Relay the warning: the user runs `omp`, `/login` on their computer. Use `--force-auth` only if they insist.
 8. **Env-var API keys** aren't in these files (for example Pi or omp providers using `DEEPSEEK_API_KEY`). Ask which env
@@ -69,8 +82,9 @@ The CLIs must already be installed on the box (`setup-agents` 2-1). Scripts live
    `bash ../delegate-task/scripts/run-agent.sh --agent <a> --read-only --timeout 120 --prompt "Reply with exactly: OK"`.
    If it fails with an auth error, fall back to logging in on the box. Status `rate_limited` means the import worked
    but the account is out of quota.
-10. **Report:** per CLI, the files imported, backups, warnings, the OK-run result and the two-machine note.
-   Mention that MCP servers or hooks pointing at programs only on the user's computer won't run on the box.
+10. **Report:** per CLI, the files imported, backups, warnings, the `parity` gaps, the OK-run result and the
+   two-machine note. Mention that MCP servers or hooks pointing at programs only on the user's computer won't run on
+   the box (Codex ones are disabled there with a comment). Afterwards `rm -rf /workspace/uploads/agent-import`.
 
 ## Lessons from real imports
 
@@ -97,6 +111,18 @@ The CLIs must already be installed on the box (`setup-agents` 2-1). Scripts live
   (logins can sit only in the WAL), and removes a stale box WAL when it replaces the db.
 - **Pi** auto-installs the `npm:` packages from the imported `settings.json` on first start, and they may need a newer Pi.
   Make sure Pi is the `@earendil-works` build on Node ≥ 22.19 (setup-agents).
+- **Pi `packages` are runtime code, not settings.** Before they were bundled, the box Pi ran without web search,
+  subagents, workflows or scrapling, and one missing local package (`Cannot find module 'typescript'` in a package
+  that loads a dev dep) stops Pi from answering at all. So packages get a full `npm ci`, not `--omit=dev`.
+- **Locally patched npm packages.** The computer's `@cortexkit/pi-anthropic-auth@1.23.0` had extra models patched
+  into `dist/`; the registry copy of the same version didn't, so the box warned `No models match pattern
+  "anthropic/claude-sonnet-5-5"`. The npm overlay keeps such patches (same version only).
+- **Claude plugins** live in `plugins/cache`, which isn't copied. `post_import.py` adds the marketplaces from
+  `extraKnownMarketplaces`, installs each enabled plugin and pins it to the computer's `gitCommitSha`, because the
+  statusLine can point at a versioned path (`.../claude-hud/0.0.10/src/index.ts`). LSP plugins also need their
+  servers (`typescript-language-server`, `gopls`, `rust-analyzer`) on the box; `parity_check.py` doesn't install those.
+- **Terminal-app integrations** (herdr, Orca) add hooks and extensions on the computer. They exit quietly without
+  their env vars, so they're harmless on the box; their hook scripts are imported so the commands don't fail.
 - **Model and reasoning:** after a successful import the script sets `agents.<a>.model` and `.reasoning` to
   `native`, so the imported settings apply (e.g. Codex `model_reasoning_effort = "xhigh"`, Pi `defaultThinkingLevel`).
   Only set a value via `configure-agents` if the user wants to override, e.g. when the imported default model is out of quota.

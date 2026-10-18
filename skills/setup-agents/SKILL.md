@@ -77,7 +77,7 @@ Install **only** the chosen ones:
   printf '#!/usr/bin/env bash\nexport PATH="$HOME/.local/opt/node22/bin:$PATH"\nexec "$HOME/.local/opt/node22/bin/node" "$HOME/.local/opt/pi/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js" "$@"\n' > ~/.local/bin/pi && chmod +x ~/.local/bin/pi
   ```
 - On first start Pi installs the `npm:` entries in `settings.json` `packages` into the global npm prefix. That takes
-  about 30 seconds once. Local `packages/...` paths from another computer are skipped.
+  about 30 seconds once. Local packages from another computer come with the import bundle (`import-agents`).
 
 Then: `$CFG init --enable <chosen,comma,separated>` (or `$CFG enable <agent>` when adding to an existing config).
 
@@ -107,8 +107,11 @@ refresh on one side can log the other out. If that happens, log in again there.
    `rm -f /workspace/uploads/agent-import.tgz`.
 5. Per CLI: `bash ../import-agents/scripts/apply_import.sh <cli> --src-home <home> --dry-run`, then without
    `--dry-run`. On exit 4 (conflicts), list the files, ask, and rerun with `--overwrite` (it backs them up). The script
-   records `auth: imported` and model/reasoning `native` when the status check passes, and installs npm deps for
-   imported Pi extensions. Exit 5: the box kept its own working omp login because the imported one is dead; relay the warning.
+   records `auth: imported` and model/reasoning `native` when the status check passes, installs npm deps for
+   imported Pi extensions and packages, then makes the CLI run like on the computer (`post_install`: Pi packages and
+   venvs, Claude plugins pinned to the computer's commit, Mac-only Codex MCP servers disabled) and checks it (`parity`).
+   Relay `breaking`/`degraded` parity gaps and a box CLI older than the computer's.
+   Exit 5: the box kept its own working omp login because the imported one is dead; relay the warning.
 6. **Fallbacks:** CLIs not found locally, and Claude on macOS (settings imported, login in the Keychain), get a
    subscription login on the box (headless recipe below) or an API key. Env-var API keys (e.g. Pi or omp providers
    using `DEEPSEEK_API_KEY`) aren't in these files: ask which env names they use, then have the user enter values through

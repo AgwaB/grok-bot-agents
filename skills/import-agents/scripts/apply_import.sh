@@ -57,7 +57,8 @@ MAX = 200 * 1024 * 1024
 
 def kind_of(rel):
     parts = rel.split("/")
-    if parts[0] in SKIP_PARTS or set(parts) & {"__pycache__", "node_modules", ".git"}: return None
+    inner = parts[2:] if parts[:2] == ["npm", "node_modules"] else parts  # Pi npm overlay lives under node_modules
+    if parts[0] in SKIP_PARTS or set(inner) & {"__pycache__", "node_modules", ".git"}: return None
     for pat, k in allow:
         if fnmatch.fnmatchcase(rel, pat): return k
     return None
@@ -76,13 +77,18 @@ ABS = re.compile(r'(/Users/[^/"\s]+|/home/(?!box\b)[^/"\s]+|[A-Za-z]:\\\\?Users\
 
 def transform(data, rel, kind):
     """Return (bytes, rewrites, leftover_abs_count). Auth/db files are left alone."""
-    if kind == "auth" or not rel.endswith(TEXT): return data, 0, 0
+    if kind in ("auth", "package", "overlay", "meta") or not rel.endswith(TEXT): return data, 0, 0
     try: t = data.decode("utf-8")
     except UnicodeDecodeError: return data, 0, 0
     n = 0
     for v in home_variants:
         n += t.count(v); t = t.replace(v, HOME)
     return t.encode("utf-8"), n, len(ABS.findall(t))
+
+def dest_of(rel):
+    # Pi packages outside ~/.pi/agent (bundle manifest `home` roots) go back to the same place under the box home
+    if cli == "pi" and rel.startswith("_home/"): return os.path.join(HOME, rel[len("_home/"):])
+    return os.path.join(dest_root, rel)
 
 ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 plan, skipped, conflicts, warnings = [], [], [], []
@@ -103,11 +109,12 @@ for root, dirs, files in os.walk(stage, followlinks=False):
         k = kind_of(rel)
         if not k: skipped.append({"path": rel, "why": "not on the allowlist for " + cli}); continue
         staged_rels.append(rel)
+        if k in ("meta", "overlay"): continue  # used by post_import.py, not copied as-is
         if k == "merge":
             plan.append({"rel": rel, "kind": k, "src": full, "dest": os.path.join(HOME, rel[len("_home/"):])}); continue
-        dest = os.path.join(dest_root, rel)
+        dest = dest_of(rel)
         data, nrw, nabs = transform(open(full, "rb").read(), rel, k)
-        if nabs: warnings.append(f"{rel}: {nabs} absolute path(s) from the other computer remain; check them")
+        if nabs and k != "dir": warnings.append(f"{rel}: {nabs} absolute path(s) from the other computer remain; check them")
         if os.path.exists(dest):
             if os.path.islink(dest) or not os.path.isfile(dest): die(f"destination is not a regular file: {dest}")
             if hashlib.sha256(data).hexdigest() == sha(dest): skipped.append({"path": rel, "why": "identical on box"}); continue
@@ -187,20 +194,35 @@ if db_changed:
     elif dead:
         warnings.append(f"omp: some imported logins are disabled: {', '.join(dead)} (others work)")
 
-# --- npm deps for imported extensions/skills (bundles exclude node_modules) ----------------------
+# --- npm deps for imported extensions/skills/packages (bundles exclude node_modules) ---------------
+# Extensions/skills: production deps. Pi packages (settings.json `packages`): all deps, as on the computer, because
+# some load dev deps at runtime (e.g. `typescript`).
 DEP_ROOTS = {"pi": ("extensions", "skills"), "codex": ("skills",), "claude": ("skills",), "omp": ()}[cli]
+def pkg_roots():
+    roots = set()
+    for rel in staged_rels:
+        parts = rel.split("/")
+        if cli == "pi" and parts[0] == "packages" and len(parts) >= 3: roots.add("/".join(parts[:2]))
+    if cli == "pi":
+        mp = os.path.join(os.path.dirname(stage), "_meta", "manifest.txt")
+        if os.path.isfile(mp):
+            for line in open(mp, encoding="utf-8", errors="replace"):
+                if line.startswith("home "): roots.add("_home/" + line[5:].strip().strip("/"))
+    return roots
+PKG_ROOTS = pkg_roots()
 dep_dirs = []
 for rel in staged_rels:
     parts = rel.split("/")
-    if parts[-1] == "package.json" and parts[0] in DEP_ROOTS and len(parts) in (2, 3):
-        d = os.path.join(dest_root, *parts[:-1])
-        if not os.path.isdir(os.path.join(d, "node_modules")): dep_dirs.append("/".join(parts[:-1]))
+    d_rel = "/".join(parts[:-1])
+    if parts[-1] == "package.json" and (d_rel in PKG_ROOTS or (parts[0] in DEP_ROOTS and len(parts) in (2, 3))):
+        if not os.path.isdir(os.path.join(dest_of(d_rel), "node_modules")): dep_dirs.append(d_rel)
 
-def has_deps(staged_pkg):
+def has_deps(staged_pkg, full=False):
     try: j = json.load(open(staged_pkg, encoding="utf-8"))
     except Exception: return True
-    return bool(j.get("dependencies") or j.get("optionalDependencies"))
-dep_dirs = sorted(d for d in set(dep_dirs) if has_deps(os.path.join(stage, d, "package.json")))
+    keys = ("dependencies", "optionalDependencies") + (("devDependencies", "peerDependencies") if full else ())
+    return any(j.get(k) for k in keys)
+dep_dirs = sorted(d for d in set(dep_dirs) if has_deps(os.path.join(stage, d, "package.json"), d in PKG_ROOTS))
 
 def install_deps():
     res, env = [], dict(os.environ)
@@ -208,9 +230,9 @@ def install_deps():
     if os.path.isdir(n22): env["PATH"] = n22 + os.pathsep + env.get("PATH", "")
     if not shutil.which("npm", path=env["PATH"]):
         warnings.append(f"npm not found: install deps manually in {dep_dirs}"); return res
-    flags = ["--omit=dev", "--no-audit", "--no-fund"]
     for rel in dep_dirs:
-        d = os.path.join(dest_root, rel); tried = []
+        flags = (["--omit=dev"] if rel not in PKG_ROOTS else []) + ["--no-audit", "--no-fund"]
+        d = dest_of(rel); tried = []
         if os.path.isdir(os.path.join(d, "node_modules")): continue
         cmds = ([["npm", "ci"] + flags] if os.path.isfile(os.path.join(d, "package-lock.json")) else []) + [["npm", "install"] + flags]
         ok = False
@@ -236,6 +258,8 @@ if dry:
     out["planned"] = [{"rel": x["rel"], "kind": x["kind"], "dest": x["dest"], "home_rewrites": x.get("rewrites", 0), "overwrites": x["rel"] in conflicts} for x in plan]
     out["planned"] = compact(out["planned"])
     if dep_dirs: out["planned"]["npm_deps"] = dep_dirs
+    out["planned"]["post_install"] = {"pi": "missing npm packages, npm overlay, package venvs", "claude": "marketplaces, enabledPlugins (pinned to the computer's SHA), tool paths, MCP uv tools",
+                                      "codex": "disable Mac-only MCP servers / notify, MCP uv tools", "omp": "MCP uv tools"}[cli]
     if omp_auth: out["omp_auth"] = omp_auth
     summarize_skipped(); print(json.dumps(out, indent=2)); sys.exit(0)
 
@@ -273,7 +297,7 @@ for x in plan:
     if os.path.exists(dest): backup(dest)
     tmp = dest + ".import-tmp"
     with open(tmp, "wb") as f: f.write(x["data"])
-    os.chmod(tmp, 0o600); os.replace(tmp, dest)
+    os.chmod(tmp, 0o700 if os.stat(x["src"]).st_mode & 0o111 else 0o600); os.replace(tmp, dest)
     out["installed"].append({"rel": x["rel"], "kind": x["kind"], "dest": dest, "home_rewrites": x["rewrites"]})
 if db_changed:
     # a box WAL/SHM left beside a replaced agent.db would be replayed into it: back up and remove
@@ -283,6 +307,9 @@ if db_changed:
             backup(stale); os.remove(stale)
 if os.path.isdir(dest_root): os.chmod(dest_root, 0o700)
 if dep_dirs: out["deps_installed"] = install_deps()
+# packages, plugins, MCP binaries, Mac-only commands (post_import.py), then the parity check (parity_check.py)
+import post_import, parity_check
+out["post_install"] = post_import.run(cli, stage, dest_root, warnings)
 
 if not noverify:
     cmd = p["verify"]
@@ -293,6 +320,10 @@ if not noverify:
         out["verify"] = {"cmd": cmd, "rc": r.returncode, "out": [l[:160] for l in txt[:8]]}
     except Exception as e:
         out["verify"] = {"cmd": cmd, "rc": None, "out": [str(e)[:200]]}
+
+out["parity"] = parity_check.check(cli)
+if not out["parity"]["ok"]:
+    warnings.append("parity check found breaking gaps: " + "; ".join(f"{g['item']}: {g['detail']}" for g in out["parity"]["gaps"] if g["impact"] == "breaking")[:400])
 
 # central config
 cfg = os.path.join(here, "..", "..", "configure-agents", "scripts", "agents_config.py")

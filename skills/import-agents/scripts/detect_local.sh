@@ -40,11 +40,12 @@ printf '{"os":"%s","home":"%s","clis":{' "$os" "$(esc "$HOME")"
 for c in "$@"; do
   case "$c" in
     codex)  d="${CODEX_HOME:-$HOME/.codex}"; auth="auth.json"; conf="config.toml"
-            extra="AGENTS.md prompts/ skills/" ;;
+            extra="AGENTS.md prompts/ skills/ rules/" ;;
     claude) d="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; auth=".credentials.json"; conf="settings.json"
-            extra="CLAUDE.md agents/ commands/ skills/" ;;
-    pi)     d="$HOME/.pi/agent"; auth="auth.json anthropic-auth.json"; conf="settings.json models.json"
-            extra="AGENTS.md prompts/ skills/ extensions/" ;;
+            extra="CLAUDE.md agents/ commands/ skills/ hooks/" ;;
+    pi)     d="$HOME/.pi/agent"; auth="auth.json anthropic-auth.json"
+            conf="settings.json models.json hud.json .pi-lens.json trust.json web-search.json anthropic-auth-state.json anthropic-auth-routing-state.json"
+            extra="AGENTS.md prompts/ skills/ extensions/ themes/ agents/ workflows/ workflow-profiles/ memory/ packages/" ;;
     omp)    d="$HOME/.omp/agent"; auth="agent.db"; conf="config.yml models.yml mcp.json"
             extra="AGENTS.md" ;;
     *) continue ;;

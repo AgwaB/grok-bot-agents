@@ -11,6 +11,9 @@ First release.
   macOS metadata and symlinks skipped, conflicts stop unless `--overwrite`. `detect_local.sh` (read-only,
   names only) and `bundle_local.sh` (one dereferenced allowlist tarball, one `CopyToBox`) run on the user's computer;
   `import_plan.py --lint-scripts` keeps them in sync with the allowlist.
+  Runtime parity: Pi packages (local, npm with local patches, venv pins), Claude plugins pinned to the computer's
+  commit, hook/statusLine tool paths, MCP server `uv tool`s, Mac-only Codex MCP/notify disabled (`post_import.py`),
+  and a read-only `parity_check.py` per CLI.
 - `setup-agents` first run defaults to importing: detect local CLIs, pre-check them, one "import everything from my
   computer" card for all chosen agents, per-agent cards only on request or without a computer, and no model card
   after an import.
