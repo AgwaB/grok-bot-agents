@@ -13,7 +13,7 @@ Grok Bot 박스(클라우드 컴퓨터)에서 **Claude Code · Codex CLI · Pi �
 2. **세팅** (`/setup-agents`)
    - 0: 등록된 컴퓨터에 어떤 CLI와 로그인·설정 파일이 있는지 확인합니다(`detect_local.sh`, 읽기 전용, 파일 이름만).
    - 2-1: 쓸 CLI를 고릅니다(복수 선택 카드). 내 컴퓨터에 있는 것은 미리 체크돼 있습니다. 고른 것만 설치합니다.
-   - 2-2: 카드 하나로 **내 컴퓨터에서 전부 가져오기 (추천)** 또는 **에이전트별로 고르기**를 고릅니다. 가져오기는 허용 목록만 묶은 tar 하나를 복사해서 로그인까지 한 번에 옮깁니다(승인 4번 정도). 내 컴퓨터에 없는 CLI와 macOS의 Claude(키체인)는 박스에서 로그인합니다. API 키는 마스킹 입력이나 `~/.agent-keys`(600)로 넣고, **채팅에는 절대 쓰지 않습니다**.
+   - 2-2: 카드 하나로 **내 컴퓨터에서 전부 가져오기 (추천)** 또는 **에이전트별로 고르기**를 고릅니다. 가져오기는 허용 목록만 묶은 tar 하나를 복사합니다(승인 4~5번 정도). 설정, 동의 카드(이름만 표시)에서 고른 API 키(`~/.agent-keys`, 600), Pi/omp 로그인이 옮겨집니다. Claude Code와 Codex 구독 로그인은 기본으로 박스에서 따로 로그인하고, 복사는 옵션입니다. 키와 토큰은 **채팅에 절대 쓰지 않습니다**.
    - 2-3: 기본 모델과 추론 레벨은 **native**(플래그를 넘기지 않음)여서 각 CLI의 자체 설정이나 가져온 설정을 그대로 씁니다. 가져온 경우엔 이 카드를 건너뜁니다. 그다음 중앙 config를 쓰고, CLI마다 OK 테스트를 돌립니다.
 3. **명시적 지시** (`/delegate-task`): 지목한 CLI로 바로 실행합니다. 일이 가벼워도 지목이 우선입니다.
 4. **자동 라우팅**: 가벼운 일은 봇이 직접 하고, 무거운 일만 활성화된 CLI에 맡깁니다. 반복·대량 작업은 Pi/omp 저가 모델, 어려운 추론·코드는 Claude/Codex, 장시간 무인 작업은 omp, 리뷰는 만들지 않은 쪽 에이전트가 맡습니다. 쓸 수 있는 CLI가 적으면 폴백 규칙을 따릅니다.
@@ -72,13 +72,13 @@ grok-bot-agents/
 
 | CLI | 가져오는 것 | 메모 |
 |---|---|---|
-| Codex | `~/.codex/auth.json`, `config.toml`, `AGENTS.md`, `prompts/`, `skills/` | `codex login status`는 파일만 확인하므로 OK 실행으로 다시 확인합니다 |
-| Claude Code | `~/.claude/.credentials.json`, `settings.json`, `CLAUDE.md`, `agents/`, `commands/`, `skills/`, `~/.claude.json`의 `mcpServers` | macOS는 키체인(`Claude Code-credentials`)에 있어서 복사가 안 됩니다. 그 경우 박스에서 로그인합니다 |
-| Pi | `~/.pi/agent/auth.json`, `anthropic-auth.json` (@cortexkit/pi-anthropic-auth 패키지용), `settings.json`, `models.json` (+ `AGENTS.md`, `prompts/`, `skills/`, `extensions/`) | Pi는 `@earendil-works/pi-coding-agent`(Node ≥ 22.19)를 씁니다. 첫 실행 때 settings의 npm 패키지를 자동 설치합니다 |
+| Codex | `config.toml`(박스에서는 파일 저장소로 고정), `AGENTS.md`, `prompts/`, `skills/`, `rules/`, API 키 방식 `auth.json` | ChatGPT 로그인은 기본으로 박스에서 `codex login --device-auth`. `auth.json`(또는 키링) 복사는 옵션입니다 |
+| Claude Code | `settings.json`, `CLAUDE.md`, `agents/`, `commands/`, `skills/`, `hooks/`, 플러그인, `~/.claude.json`의 `mcpServers` | 로그인은 기본으로 박스에서 `claude auth login`. 파일이나 macOS 키체인(`Claude Code-credentials`) 복사는 옵션입니다 |
+| Pi | `~/.pi/agent/auth.json`, 패키지 인증 파일(`*auth*.json`, `*token*.json`, `web-search*.json` 등), `settings.json`, `models.json`, 패키지 (+ `AGENTS.md`, `prompts/`, `skills/`, `extensions/`) | Pi는 `@earendil-works/pi-coding-agent`(Node ≥ 22.19)를 씁니다. 첫 실행 때 settings의 npm 패키지를 자동 설치합니다 |
 | omp | `~/.omp/agent/agent.db` (로그인·설정 SQLite), `config.yml`, `models.yml`, `mcp.json` | 먼저 omp를 종료합니다. `-wal`/`-shm` 파일이 있으면 같이 가져옵니다 |
 
-세션, 히스토리, 로그, 캐시와 SSH 키 등 관련 없는 dotfile은 가져오지 않습니다. env 변수로 쓰던 API 키는 따로 마스킹 입력으로 `~/.agent-keys`에 넣습니다.
-같은 로그인을 두 컴퓨터에서 쓰게 되면, OAuth 토큰이 갱신될 때 한쪽이 로그아웃될 수 있습니다. 그때는 그쪽에서 다시 로그인합니다.
+세션, 히스토리, 로그, 캐시, SSH 키, 브라우저 프로필 로그인, 클라우드 자격 증명 등은 가져오지 않습니다. env 변수나 `!command`/`op://`로 쓰던 API 키는 동의 카드에서 고른 것만 `export_secrets.sh`로 내보내 박스 `~/.agent-keys`에 합칩니다.
+같은 로그인을 두 컴퓨터에서 쓰게 되면, OAuth 토큰이 갱신될 때 한쪽이 로그아웃될 수 있습니다. 그래서 Claude Code와 Codex는 기본으로 박스에서 따로 로그인합니다.
 
 ## 답을 내 터미널로 받기 (Tailscale)
 

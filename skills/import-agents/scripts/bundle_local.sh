@@ -14,8 +14,24 @@
 # Dirs are expanded with `find -L` (no node_modules/.git/.venv/__pycache__); dangling links are left out.
 # Never prints file contents: only the bundle path, size, member count and top-level entry names.
 # The tarball holds login tokens: it is 600, and must be deleted on the computer right after CopyToBox.
+#   sh -s -- [--copy-login claude,codex] [--include <home-rel path>]... [--skip <home-rel path>]... <cli>...
+# Rotating subscription logins stay OUT by default (the box gets its own login): ~/.claude/.credentials.json, a ChatGPT
+# ~/.codex/auth.json and ~/.codex/.credentials.json (MCP OAuth) go in only with --copy-login <cli>. A Codex API-key
+# auth.json (static) is always bundled. Pi package auth files match *auth*.json, *token*.json, *credential*.json,
+# web-search*.json; ~/.pi/agent/.env only with --include .pi/agent/.env. --skip drops a path the user unticked.
+# ~/.agent-import-secrets/ (written by export_secrets.sh from the consent card) is bundled, then deleted here.
 umask 077
-[ $# -gt 0 ] || { echo '{"ok":false,"error":"usage: bundle_local.sh <cli>..."}'; exit 2; }
+copy_login=""; incl=" "; skipl=" "; n=$#
+while [ "$n" -gt 0 ]; do
+  a=$1; shift; n=$((n - 1))
+  case "$a" in
+    --copy-login) copy_login=",$1,"; shift; n=$((n - 1)) ;;
+    --include) incl="$incl$1 "; shift; n=$((n - 1)) ;;
+    --skip) skipl="$skipl$1 "; shift; n=$((n - 1)) ;;
+    *) set -- "$@" "$a" ;;
+  esac
+done
+[ $# -gt 0 ] || { echo '{"ok":false,"error":"usage: bundle_local.sh [--copy-login claude,codex] [--include P] [--skip P] <cli>..."}'; exit 2; }
 PATH="$HOME/.local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 export PATH
 cd "$HOME" || exit 2
@@ -24,9 +40,11 @@ out="$HOME/agent-import.tgz"
 man=".agent-import-manifest.txt"
 list=$(mktemp 2>/dev/null || echo "/tmp/agent-import-list.$$")
 : >"$man"
-entries=""; notes=""; npk=0
+entries=""; notes=""; npk=0; left=""
+leave() { left="$left${left:+,}\"$1\""; }
 add() { # a file, or every file under a dir (symlinked dirs followed, so linked skills become real files)
   [ -e "$1" ] || return 0
+  case "$skipl" in *" $1 "*) leave "$1 (unticked)"; return 0 ;; esac
   if [ -d "$1" ]; then
     find -L "$1" \( -name node_modules -o -name .git -o -name .venv -o -name __pycache__ -o -name .DS_Store -o -name '._*' \) \
       -prune -o -type f -print >>"$list" 2>/dev/null
@@ -77,14 +95,26 @@ pi_packages() {
     esac
   done
 }
+login() { # <cli> <path>: a rotating login file, bundled only with --copy-login <cli>
+  [ -e "$2" ] || return 0
+  case "$copy_login" in *",$1,"*) add "$2" ;; *) leave "$2 (default: log in on the box; --copy-login $1 to copy)" ;; esac
+}
 for c in "$@"; do
   case "$c" in
-    codex)  for f in auth.json config.toml AGENTS.md prompts skills rules; do add ".codex/$f"; done ;;
-    claude) for f in .credentials.json settings.json CLAUDE.md agents commands skills hooks plugins/installed_plugins.json; do add ".claude/$f"; done
+    codex)  # a ChatGPT login has a "tokens" object (rotating); an API-key auth.json doesn't (static, always copied)
+            if [ -f .codex/auth.json ] && ! grep -q '"tokens"[[:space:]]*:[[:space:]]*{' .codex/auth.json 2>/dev/null; then add .codex/auth.json
+            else login codex .codex/auth.json; fi
+            login codex .codex/.credentials.json
+            for f in config.toml AGENTS.md prompts skills rules; do add ".codex/$f"; done ;;
+    claude) login claude .claude/.credentials.json
+            for f in settings.json CLAUDE.md agents commands skills hooks plugins/installed_plugins.json; do add ".claude/$f"; done
             add ".claude.json" ;;
-    pi)     for f in auth.json settings.json models.json anthropic-auth.json AGENTS.md prompts skills extensions themes agents \
-                     workflows workflow-profiles memory hud.json .pi-lens.json trust.json web-search.json \
-                     anthropic-auth-state.json anthropic-auth-routing-state.json; do add ".pi/agent/$f"; done
+    pi)     for f in auth.json settings.json models.json AGENTS.md prompts skills extensions themes agents \
+                     workflows workflow-profiles memory hud.json .pi-lens.json trust.json; do add ".pi/agent/$f"; done
+            for g in .pi/agent/*auth*.json .pi/agent/*token*.json .pi/agent/*credential*.json .pi/agent/web-search*.json; do
+              case "$g" in .pi/agent/auth.json|.pi/agent/oauth.json) ;; *) [ -f "$g" ] && add "$g" ;; esac
+            done
+            if [ -f .pi/agent/.env ]; then case "$incl" in *" .pi/agent/.env "*) add .pi/agent/.env ;; *) leave ".pi/agent/.env (off by default; --include .pi/agent/.env)" ;; esac; fi
             before=$(wc -l <"$list"); pi_packages; npk=$(( $(wc -l <"$list") - before ))
             [ "$npk" -gt 0 ] && entries="$entries${entries:+,}\".pi/agent/packages/\",\".pi/agent/npm/node_modules/\"" ;;
     omp)    for f in agent.db agent.db-wal agent.db-shm config.yml models.yml AGENTS.md mcp.json; do add ".omp/agent/$f"; done ;;
@@ -95,16 +125,20 @@ done
 if command -v uv >/dev/null 2>&1; then # uv tools (MCP server binaries): "uvtool <name>==<ver> <exe>"
   uv tool list 2>/dev/null | awk '/^- /{ if (t != "") print "uvtool " t " " $2; next } NF>=2 { v=$2; sub(/^v/, "", v); t=$1 "==" v }' >>"$man"
 fi
-if [ ! -s "$list" ]; then rm -f "$list" "$man"; echo '{"ok":false,"error":"nothing to bundle"}'; exit 3; fi
+secrets=0
+if [ -d .agent-import-secrets ]; then # consented exports from export_secrets.sh
+  find .agent-import-secrets -type f ! -path '*/.tmp/*' >>"$list"; secrets=$(find .agent-import-secrets -type f ! -path '*/.tmp/*' | wc -l | tr -d ' ')
+fi
+if [ ! -s "$list" ]; then rm -f "$list" "$man"; rm -rf .agent-import-secrets; echo '{"ok":false,"error":"nothing to bundle"}'; exit 3; fi
 [ -s "$man" ] && printf '%s\n' "$man" >>"$list"
 rm -f "$out"
 # Every entry is a file already (dirs were expanded above), so node_modules of an npm overlay survives.
 COPYFILE_DISABLE=1 tar czhf "$out" --exclude='._*' --exclude='.DS_Store' --exclude='*.pyc' -T "$list" 2>/dev/null
 rc=$?
-rm -f "$list" "$man"
+rm -f "$list" "$man"; rm -rf .agent-import-secrets
 [ -f "$out" ] || { echo "{\"ok\":false,\"error\":\"tar failed (rc $rc)\"}"; exit 1; }
 chmod 600 "$out"
 bytes=$(wc -c <"$out" | tr -d ' ')
 members=$(tar tzf "$out" 2>/dev/null | wc -l | tr -d ' ')
 # rc != 0 with a bundle usually means dangling symlinks were skipped.
-printf '{"ok":true,"bundle":"%s","bytes":%s,"members":%s,"pi_package_files":%s,"tar_rc":%s,"entries":[%s],"notes":[%s]}\n' "$out" "$bytes" "$members" "$npk" "$rc" "$entries" "$notes"
+printf '{"ok":true,"bundle":"%s","bytes":%s,"members":%s,"pi_package_files":%s,"secret_files":%s,"tar_rc":%s,"entries":[%s],"left_out":[%s],"notes":[%s]}\n' "$out" "$bytes" "$members" "$npk" "$secrets" "$rc" "$entries" "$left" "$notes"

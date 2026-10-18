@@ -9,10 +9,144 @@ failures become warnings, never exceptions. Never prints file contents.
           statusLine commands whose absolute tool path is missing at the box's copy of that tool.
 - codex:  disables MCP servers and `notify` commands that point at programs missing on the box (e.g. /Applications).
 - all:    installs missing MCP server binaries that the computer had as `uv tool`s, flags a box CLI older than the computer's.
+Auth helpers (used by apply_import.sh before files are written, so re-imports compare equal):
+- merge_agent_keys: staged _secrets/secrets.env (export_secrets.sh) -> ~/.agent-keys (600), same-name lines replaced,
+  no duplicates, values never printed; the staged file is overwritten and deleted.
+- pin_codex_file_store: the box has no OS keyring, so Codex config.toml gets cli_auth_credentials_store and
+  mcp_oauth_credentials_store = "file".
+- rewrite_refs: Pi auth.json / models.json and omp models.yml `!command` / op:// keys that export_secrets.sh resolved
+  become env-name references (_secrets/rewrites.txt: "<cli> <file> <provider> <ENV>").
 """
 import json, os, re, shutil, subprocess
 
 HOME = os.path.expanduser("~")
+ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=")
+STAGED_LINE = re.compile(r"^export ([A-Za-z_][A-Za-z0-9_]*)='(?:[^']|'\\'')*'$")
+
+
+def shred(path):
+    """Overwrite a staged secret with zeros, then delete it (best effort on copy-on-write filesystems)."""
+    try:
+        n = os.path.getsize(path)
+        with open(path, "r+b") as f:
+            f.write(b"\0" * n); f.flush(); os.fsync(f.fileno())
+    except Exception: pass
+    try: os.remove(path)
+    except FileNotFoundError: pass
+
+
+def agent_keys_names(path=None):
+    """Env names defined in ~/.agent-keys (names only; values are never returned)."""
+    path = path or os.path.join(HOME, ".agent-keys"); names = set()
+    try:
+        for line in open(path, encoding="utf-8", errors="replace"):
+            m = ENV_LINE.match(line)
+            if m: names.add(m.group(1))
+    except FileNotFoundError: pass
+    return names
+
+
+def merge_agent_keys(stage_root, dry=False, keys_path=None):
+    """Merge <stage_root>/_secrets/secrets.env into ~/.agent-keys. Returns names only."""
+    src = os.path.join(stage_root, "_secrets", "secrets.env")
+    keys_path = keys_path or os.path.join(HOME, ".agent-keys")
+    if not os.path.isfile(src): return None
+    new, bad = {}, 0
+    for line in open(src, encoding="utf-8", errors="replace").read().splitlines():
+        if not line.strip(): continue
+        m = STAGED_LINE.match(line)
+        if m: new[m.group(1)] = line
+        else: bad += 1
+    cur = open(keys_path, encoding="utf-8", errors="replace").read().splitlines() if os.path.isfile(keys_path) else []
+    out, seen, res = [], set(), {"added": [], "replaced": [], "unchanged": [], "rejected_lines": bad}
+    for line in cur:
+        m = ENV_LINE.match(line); n = m.group(1) if m else None
+        if n in new:
+            if n in seen: continue  # drop a duplicate of a name we set
+            seen.add(n); res["unchanged" if line == new[n] else "replaced"].append(n); out.append(new[n]); continue
+        out.append(line)
+    for n, line in new.items():
+        if n not in seen: out.append(line); res["added"].append(n)
+    for k in ("added", "replaced", "unchanged"): res[k] = sorted(res[k])
+    res["keys_file"] = keys_path
+    if dry: return res
+    tmp = keys_path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f: f.write("\n".join(out) + "\n")
+    os.chmod(tmp, 0o600); os.replace(tmp, keys_path)
+    shred(src)
+    rc = os.path.join(HOME, ".bashrc")
+    try: has = "agent-keys" in open(rc, encoding="utf-8", errors="replace").read()
+    except FileNotFoundError: has = False
+    if not has:
+        with open(rc, "a", encoding="utf-8") as f: f.write("\n[ -f ~/.agent-keys ] && . ~/.agent-keys\n")
+        res["bashrc_sources_it"] = "added"
+    return res
+
+
+def pin_codex_file_store(text):
+    """Force file credential stores in a Codex config.toml (top-level keys). Returns (text, changed key names)."""
+    m = re.search(r"(?m)^\s*\[", text); top, rest = (text[:m.start()], text[m.start():]) if m else (text, "")
+    changed = []
+    for key in ("cli_auth_credentials_store", "mcp_oauth_credentials_store"):
+        line = f'{key} = "file"  # box: no OS keyring here (grok-bot-agents import)'
+        pat = re.compile(r"(?m)^[ \t]*%s[ \t]*=.*$" % key)
+        hit = pat.search(top)
+        if hit:
+            if re.match(r'^[ \t]*%s[ \t]*=[ \t]*"file"' % key, hit.group(0)): continue
+            top = top[:hit.start()] + line + top[hit.end():]
+        else:
+            top = line + "\n" + top
+        changed.append(key)
+    return top + rest, changed
+
+
+def read_rewrites(stage_root):
+    """[(cli, file, provider, env)] from _secrets/rewrites.txt (names only)."""
+    p = os.path.join(stage_root, "_secrets", "rewrites.txt"); res = []
+    if not os.path.isfile(p): return res
+    for line in open(p, encoding="utf-8", errors="replace"):
+        parts = line.split()
+        if len(parts) == 4 and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", parts[3]) and re.match(r"^[A-Za-z0-9_.@:+-]+$", parts[2]):
+            res.append(tuple(parts))
+    return res
+
+
+def _indirect(v):
+    return isinstance(v, str) and (v.startswith("!") or v.startswith("op://"))
+
+
+def rewrite_refs(cli, rel, data, rewrites):
+    """Point resolved `!command` / op:// keys at env names. Returns (bytes, [provider names rewritten])."""
+    todo = {p: env for c, f, p, env in rewrites if c == cli and f == rel}
+    if not todo: return data, []
+    try: text = data.decode("utf-8")
+    except UnicodeDecodeError: return data, []
+    done = []
+    if rel in ("auth.json", "models.json"):
+        try: j = json.loads(text)
+        except Exception: return data, []
+        for p, env in todo.items():
+            e = (j.get(p) if rel == "auth.json" else (j.get("providers") or {}).get(p))
+            k = "key" if rel == "auth.json" else "apiKey"
+            if isinstance(e, dict) and _indirect(e.get(k)):
+                e[k] = env; done.append(p)
+        return (json.dumps(j, indent=2) + "\n").encode("utf-8") if done else data, done
+    if rel == "models.yml":
+        lines, stack = text.split("\n"), []
+        for i, line in enumerate(lines):
+            m = re.match(r"^(\s*)([\"']?)([A-Za-z0-9_.@-]+)\2\s*:\s*(.*)$", line)
+            if not m or re.match(r"^\s*(#|$)", line): continue
+            ind = len(m.group(1))
+            while stack and stack[-1][0] >= ind: stack.pop()
+            path = [k for _, k in stack]
+            if m.group(3) == "apiKey" and len(path) == 2 and path[0] == "providers" and path[1] in todo:
+                v = re.sub(r"\s+#.*$", "", m.group(4)).strip().strip("\"'")
+                if _indirect(v):
+                    lines[i] = f"{m.group(1)}apiKey: {todo[path[1]]}"; done.append(path[1])
+            stack.append((ind, m.group(3)))
+        return ("\n".join(lines)).encode("utf-8") if done else data, done
+    return data, []
 
 
 def sh(cmd, timeout=600, cwd=None, env=None):

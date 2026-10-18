@@ -17,8 +17,8 @@ artifact paths.
 
 | Skill | What it does |
 |---|---|
-| `setup-agents` | Detect the CLIs already set up on your computer, pick CLIs (multi-select), install only those, import them all with logins by default (or sign in per agent: subscription takeover, API key via masked input), keep model/reasoning native, write the config, run an OK test per CLI |
-| `import-agents` | Copy existing CLI logins and settings from your registered computer to the box as one allowlisted bundle (or file by file), with your approval for each copy |
+| `setup-agents` | Detect the CLIs already set up on your computer, pick CLIs (multi-select), install only those, import them all by default (settings, consented API keys, Pi/omp logins; Claude Code and Codex log in on the box unless you opt in to copying), or sign in per agent (subscription takeover, API key via masked input), keep model/reasoning native, write the config, run an OK test per CLI |
+| `import-agents` | Copy existing CLI settings, consented API keys and logins from your registered computer (macOS, Linux, Windows) to the box as one allowlisted bundle (or file by file), with your approval for each copy |
 | `configure-agents` | Change models, reasoning, permission mode, routing, logins/keys and each CLI's native config |
 | `delegate-task` | Decide light vs heavy, route to a CLI (or the one you named), write a standalone brief, run it headless, report back. Includes read-only code review |
 | `agent-bridge-webhook` | Two-way handoff with agents on another machine or CI through a webhook routine; answers stream back to the caller's terminal over Tailscale (`grok-send-task --wait`), with sanitizing in both directions |
@@ -27,9 +27,10 @@ artifact paths.
 
 1. **Install** the plugin from the Cursor marketplace (Settings → plugins in Grok Bot).
 2. **Set up** (`/setup-agents`): the bot checks which CLIs your computer already has, you choose CLIs, and
-   by default it imports all of them, logins included ("import everything from my computer"), in about four
-   approvals. CLIs not found locally, and Claude on macOS (Keychain), sign in on the box instead. API keys go
-   through masked input or `~/.agent-keys` (mode 600), **never into chat**. Model and reasoning default to
+   by default it imports all of them ("import everything from my computer") in about four or five approvals:
+   settings, the API keys you tick on one name-only consent card (into `~/.agent-keys`, mode 600), and Pi/omp logins.
+   Claude Code and Codex subscriptions get their own login on the box by default; copying them is an opt-in. Keys
+   and tokens **never go into chat**. Model and reasoning default to
    **native**: no flag is passed and each CLI's own (or imported) settings apply.
 3. **Delegate** (`/delegate-task`): "have pi translate the README", "analyze this log folder", "fix this bug".
 4. **Change settings** (`/configure-agents`): "set claude reasoning to max", "turn off omp".
@@ -106,15 +107,17 @@ Shared by every bot on the box. Keys are never stored, only env var names (`key_
 
 | CLI | Imported | Notes |
 |---|---|---|
-| Codex | `~/.codex/auth.json`, `config.toml`, `AGENTS.md`, `prompts/`, `skills/` | `codex login status` only checks the file; a real OK run confirms it |
-| Claude Code | `~/.claude/.credentials.json`, `settings.json`, `CLAUDE.md`, `agents/`, `commands/`, `skills/`, `mcpServers` from `~/.claude.json` | On macOS the login is in the Keychain and can't be copied: sign in on the box instead |
-| Pi | `~/.pi/agent/auth.json`, `anthropic-auth.json`, `settings.json`, `models.json` (+ `AGENTS.md`, `prompts/`, `skills/`, `extensions/`) | Needs `@earendil-works/pi-coding-agent` (Node ≥ 22.19) |
+| Codex | `config.toml` (pinned to file credential stores), `AGENTS.md`, `prompts/`, `skills/`, `rules/`; an API-key `auth.json` | ChatGPT login: `codex login --device-auth` on the box by default; copying `auth.json` (or the keyring item) is opt-in |
+| Claude Code | `settings.json`, `CLAUDE.md`, `agents/`, `commands/`, `skills/`, `hooks/`, plugins, `mcpServers` from `~/.claude.json` | Login: `claude auth login` on the box by default; copying (file, or the macOS Keychain item) is opt-in |
+| Pi | `~/.pi/agent/auth.json`, package auth files (`*auth*.json`, `*token*.json`, `web-search*.json`, …), `settings.json`, `models.json`, packages (+ `AGENTS.md`, `prompts/`, `skills/`, `extensions/`) | Needs `@earendil-works/pi-coding-agent` (Node ≥ 22.19) |
 | omp | `~/.omp/agent/agent.db`, `config.yml`, `models.yml`, `mcp.json` | Quit omp first; `-wal`/`-shm` come along |
 
-`detect_local.sh` (read-only, names only) and `bundle_local.sh` run on your computer through one machine Shell
-call each. The bundle is one dereferenced `tar -h` tarball of the allowlist (symlinked skills become real files),
+`detect_local.sh` (read-only, names only; `detect_local.ps1` on Windows), `export_secrets.sh` (only the consented
+keys, values straight into 600 files) and `bundle_local.sh` run on your computer through one machine Shell call each.
+Env-var keys and `!command`/`op://` keys you tick are merged into the box `~/.agent-keys`. The bundle is one dereferenced `tar -h` tarball of the allowlist (symlinked skills become real files),
 copied with one `CopyToBox`, deleted on your computer, and staged with `stage_tar.py`. Sessions, history, logs, caches, SSH keys and unrelated dotfiles are never
-imported. Sharing one OAuth login across two machines can log one of them out when the token refreshes.
+imported, and neither are browser-profile logins or cloud credentials. Sharing one OAuth login across two machines can
+log one of them out when the token refreshes, which is why Claude Code and Codex default to a box login.
 
 ## Answers back in your terminal (Tailscale)
 

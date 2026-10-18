@@ -14,6 +14,18 @@ First release.
   Runtime parity: Pi packages (local, npm with local patches, venv pins), Claude plugins pinned to the computer's
   commit, hook/statusLine tool paths, MCP server `uv tool`s, Mac-only Codex MCP/notify disabled (`post_import.py`),
   and a read-only `parity_check.py` per CLI.
+- Auth import (general, macOS/Linux/Windows): `detect_local.sh` adds a name-only secret inventory (login files and
+  type, Pi OAuth expiry, env names configs reference and whether they're set in the process or login shell,
+  `!cmd`/`op://` indirections by tool name, literal keys in configs by key path, package auth files, remote MCP servers
+  needing OAuth, Keychain/Secret Service presence); `detect_local.ps1` is its Windows twin with the same scanner.
+  One consent card; the new `export_secrets.sh` exports only the ticked items (env values, `!cmd` results, opt-in
+  Keychain logins) into 600 files and prints names and sizes only. Claude Code and Codex subscription logins default
+  to a box login; copying them (`bundle_local.sh --copy-login`, `keychain:claude`/`keychain:codex`) is an opt-in with
+  the two-machine and Anthropic ToS warnings. `apply_import.sh keys` merges exported keys into `~/.agent-keys`
+  (no duplicates), Codex is pinned to file credential stores, resolved Pi/omp `!cmd` keys become env-name references,
+  a copied Claude login brings `oauthAccount`/`hasCompletedOnboarding`. Pi package auth files are matched by pattern,
+  not package name; `import_plan.py` marks rotation, default and sensitive files; `parity_check.py` adds an `auth`
+  section (names only). `tests/auth_import_test.sh` checks that no secret value reaches any script output.
 - `setup-agents` first run defaults to importing: detect local CLIs, pre-check them, one "import everything from my
   computer" card for all chosen agents, per-agent cards only on request or without a computer, and no model card
   after an import.

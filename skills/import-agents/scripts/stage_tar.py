@@ -5,14 +5,18 @@
 
 Member mapping: .codex/* -> codex/*, .claude/* -> claude/*, .claude.json -> claude/_home/.claude.json,
 .pi/agent/* -> pi/*, .omp/agent/* -> omp/*. bundle_local.sh's .agent-import-manifest.txt -> _meta/manifest.txt;
-its `home <dir>` roots (Pi packages outside ~/.pi/agent) -> pi/_home/<dir>/*. Anything else is skipped.
+its `home <dir>` roots (Pi packages outside ~/.pi/agent) -> pi/_home/<dir>/*. export_secrets.sh output:
+.agent-import-secrets/claude/* -> claude/*, .agent-import-secrets/codex/* -> codex/*, secrets.env and rewrites.txt ->
+_secrets/ (merged into ~/.agent-keys by apply_import.sh). Anything else is skipped.
 Executable bits are kept (700), other files are 600.
 Skips macOS metadata (._*, .DS_Store), *.pyc, symlinks/hardlinks/devices, absolute paths and '..'.
 Never prints file contents. Stage dirs are created 700. Then run apply_import.sh per CLI.
 """
 import argparse, json, os, sys, tarfile
 
-MAP = [(".codex/", "codex/"), (".claude.json", "claude/_home/.claude.json"), (".claude/", "claude/"),
+MAP = [(".agent-import-secrets/claude/", "claude/"), (".agent-import-secrets/codex/", "codex/"),
+       (".agent-import-secrets/secrets.env", "_secrets/secrets.env"), (".agent-import-secrets/rewrites.txt", "_secrets/rewrites.txt"),
+       (".codex/", "codex/"), (".claude.json", "claude/_home/.claude.json"), (".claude/", "claude/"),
        (".pi/agent/", "pi/"), (".omp/agent/", "omp/")]
 MANIFEST = ".agent-import-manifest.txt"
 
@@ -59,12 +63,12 @@ def main():
             t = target(name)
             if not t and "pi" in clis:
                 t = next(("pi/_home/" + name for r in roots if name.startswith(r)), None)
-            if not t or t.split("/")[0] not in clis: skip("not a CLI path"); continue
+            if not t or (t.split("/")[0] not in clis and not t.startswith("_secrets/")): skip("not a CLI path"); continue
             dest = os.path.join(a.stage, t)
             os.makedirs(os.path.dirname(dest), mode=0o700, exist_ok=True)
             src = tf.extractfile(m)
             with open(dest, "wb") as f: f.write(src.read())
-            os.chmod(dest, 0o700 if m.mode & 0o111 else 0o600)
+            os.chmod(dest, 0o700 if m.mode & 0o111 and not t.startswith("_secrets/") else 0o600)
             c = t.split("/")[0]; counts[c] = counts.get(c, 0) + 1
     print(json.dumps({"ok": True, "stage": a.stage, "staged_files": counts, "skipped": skipped}, indent=2))
 

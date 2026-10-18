@@ -7,9 +7,10 @@ python3 -m json.tool .cursor-plugin/plugin.json >/dev/null
 for f in skills/*/SKILL.md; do                      # frontmatter name must match the folder
   n=$(sed -n '2,6s/^name: *//p' "$f"); [ "$n" = "$(basename "$(dirname "$f")")" ] || echo "BAD $f"
 done
-for f in skills/*/scripts/*.sh; do bash -n "$f"; done
-shellcheck -s sh skills/import-agents/scripts/{detect,bundle}_local.sh
-python3 skills/import-agents/scripts/import_plan.py --os linux --home x --lint-scripts
+for f in skills/*/scripts/*.sh tests/*.sh; do bash -n "$f"; done
+shellcheck -s sh skills/import-agents/scripts/{detect,bundle}_local.sh skills/import-agents/scripts/export_secrets.sh
+python3 skills/import-agents/scripts/import_plan.py --os linux --home x --lint-scripts   # also: .ps1 embeds the same scanner
+pwsh -NoProfile -Command '$null = [scriptblock]::Create((Get-Content -Raw skills/import-agents/scripts/detect_local.ps1))'  # parses
 python3 -m py_compile skills/*/scripts/*.py && find . -name __pycache__ -prune -exec rm -rf {} +
 ```
 
@@ -27,6 +28,30 @@ python3 -m py_compile skills/*/scripts/*.py && find . -name __pycache__ -prune -
 | Runtime parity | `parity_check.py` on the box: no gaps after an import. `post_import.py` units with stubs: a `pi` stub listing `npm:@sc/a` → staged `npm/node_modules/@sc/{a,core}` patch the same versions (hoisted and nested), a different version is left; a git marketplace with two commits → the plugin is pinned to the computer's SHA and `installed_plugins.json` updated; a statusLine under a missing `$HOME/...` tool path → the box's `which` copy; Codex `/Applications/...` MCP server → `enabled = false`, one-line `notify` commented out |
 | Bundle packages | `bundle_local.sh pi` on a home with local packages (repo and plain dir, one with `.venv`) and `npm:` ones: git-tracked files only for the repo, no `node_modules`/`.venv`, the npm overlay keeps `npm/node_modules/<pkg>` files; manifest has `home`, `venv`, `pip`, `uvtool`, `version` lines; `stage_tar.py` maps `home` roots to `pi/_home/` |
 | Local detect / bundle | Fake home (`env -i HOME=$(mktemp -d) PATH=<stub bin>:/usr/bin:/bin sh -s < detect_local.sh`) with auth/config files, a symlinked and a dangling skill, `._x`/`.DS_Store`, `~/.ssh/id_rsa`, a hanging `omp --version` stub: valid JSON, names only, the hang is cut at ~10 s. `bundle_local.sh codex claude pi omp`: tarball 600, symlinked skill dereferenced, dangling link/metadata/SSH key left out (`tar_rc` 1 for the dangling link); `stage_tar.py` stages it and `apply_import.sh --dry-run` plans it; unknown CLI exits 2 |
+
+## Auth import: no secret in any output
+
+`bash tests/auth_import_test.sh` (exit 0 = PASS). Fake Codex/Claude/Pi/omp homes (`tests/fake_home.sh`) in temp
+dirs, with every secret value containing a random canary string, a stub `security` (fake Keychain: attributes without
+`-w`, the canary with `-w`), stub `op`/`pass`, a fake `uname` for the macOS path, and a key exported only in `~/.bashrc`
+(login-shell path). It never touches real box or computer logins. It runs detect (macOS and Linux mode),
+`export_secrets.sh` (a refused item writes nothing; consented `env:`, `keychain:`, `resolve:` items), `bundle_local.sh`
+with defaults and with `--copy-login`/`--include`, `stage_tar.py`, `apply_import.sh keys` (dry and real),
+`apply_import.sh <cli>` for all four (opt-in box and default box) and `parity_check.py`, and then checks:
+- the canary appears nowhere in the captured stdout + stderr of every script;
+- detect reports env names (process / login shell) and Keychain presence; default bundles leave the Claude/Codex
+  logins and `.pi/agent/.env` out and say so in `left_out`; no SSH key; bundle and export files are 600;
+- `~/.agent-keys` is 600, same-name lines replaced without duplicates, other lines kept, a re-merge is a no-op, values
+  match the source (compared in a subshell); staged `secrets.env` is gone;
+- Codex `config.toml` has file credential stores; Pi `models.json` / omp `models.yml` `!cmd` keys point at env names;
+  a copied Claude login merged `oauthAccount` + `hasCompletedOnboarding` (and nothing else from `~/.claude.json`);
+  the default import warns "log in on the box" with no two-machine warning;
+- `parity_check.py` `auth` reports names only: unset env names, missing `!cmd` tools, remote MCP servers to log in, the ToS flag.
+
+Windows twin: `env -i HOME=<fake> USERPROFILE=<fake> PATH=<stubs>:/usr/bin:/bin pwsh -NoProfile -File
+skills/import-agents/scripts/detect_local.ps1` on the same fake home gives the same inventory, no canary in the output,
+also when wrapped as `& ([scriptblock]::Create(@'…'@)) -Clis codex,pi`. Not yet run on real Windows or real macOS
+(Keychain prompt, JXA fallback when neither node nor bun is installed).
 
 ## End-to-end (real logins on the box, 2026-10-18)
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Install staged CLI files (copied from the user's computer with CopyToBox) into the box's CLI home.
 #   apply_import.sh <codex|claude|pi|omp> [--src-home /Users/alice] [--dry-run] [--overwrite] [--force-auth] [--keep-stage] [--no-verify]
+#   apply_import.sh keys [--dry-run]     merge the staged _secrets/secrets.env (export_secrets.sh) into ~/.agent-keys
 # Stage: ${AGENT_IMPORT_STAGE:-/workspace/uploads/agent-import}/<cli>/<rel path as in import_plan.py>
 # - Installs only allowlisted paths; anything else (SSH keys, other dotfiles, caches, sessions) is skipped and reported.
 # - Never prints file contents. Rejects symlinks and non-regular files.
@@ -16,6 +17,13 @@
 #   If every staged login is disabled (or there is none) while the box agent.db has a working one, agent.db* is NOT
 #   replaced, even with --overwrite (the rest still installs); "omp_auth" explains it and the exit code is 5.
 #   --force-auth replaces it anyway.
+# - Secrets: the staged _secrets/secrets.env is merged into ~/.agent-keys (600; same-name lines replaced, no dupes; names
+#   only in the output) by `keys`, or automatically by the first real CLI run. Then it's overwritten and deleted.
+#   Pi/omp keys that were `!command` / op:// and got resolved on the computer are rewritten to env-name references
+#   (_secrets/rewrites.txt). Codex config.toml is pinned to file credential stores (the box has no OS keyring).
+#   A copied Claude login (opt-in) also merges oauthAccount + hasCompletedOnboarding from ~/.claude.json.
+#   Claude/Codex subscription logins are not bundled by default: the warning says to log in on the box instead.
+# - The status check runs with ~/.agent-keys sourced. Staged auth files are overwritten before deletion.
 # Exit codes: 0 ok, 2 usage/stage error, 4 conflicts (rerun with --overwrite), 5 installed but box omp login kept.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -25,11 +33,18 @@ import datetime, fnmatch, hashlib, json, os, re, shutil, stat, subprocess, sys
 here, args = sys.argv[1], sys.argv[2:]
 sys.path.insert(0, here)
 from import_plan import PLAN
+import post_import
 
 def die(msg, code=2):
     print(json.dumps({"ok": False, "error": msg})); sys.exit(code)
 
-if not args or args[0] not in PLAN: die("usage: apply_import.sh <codex|claude|pi|omp> [--src-home H] [--dry-run] [--overwrite] [--force-auth] [--keep-stage] [--no-verify]")
+STAGE_ROOT = os.environ.get("AGENT_IMPORT_STAGE", "/workspace/uploads/agent-import")
+if args and args[0] == "keys":
+    r = post_import.merge_agent_keys(STAGE_ROOT, dry="--dry-run" in args[1:])
+    print(json.dumps({"ok": True, "dry_run": "--dry-run" in args[1:], "agent_keys": r} if r is not None
+                     else {"ok": True, "agent_keys": None, "note": "no staged secrets.env"}, indent=2)); sys.exit(0)
+
+if not args or args[0] not in PLAN: die("usage: apply_import.sh <codex|claude|pi|omp> [--src-home H] [--dry-run] [--overwrite] [--force-auth] [--keep-stage] [--no-verify] | apply_import.sh keys [--dry-run]")
 cli = args[0]; opts = args[1:]
 dry, overwrite, keep, noverify = "--dry-run" in opts, "--overwrite" in opts, "--keep-stage" in opts, "--no-verify" in opts
 force_auth = "--force-auth" in opts
@@ -37,7 +52,7 @@ src_home = None
 if "--src-home" in opts:
     i = opts.index("--src-home"); src_home = opts[i + 1] if i + 1 < len(opts) else die("--src-home needs a value")
 HOME = os.path.expanduser("~")
-stage = os.path.join(os.environ.get("AGENT_IMPORT_STAGE", "/workspace/uploads/agent-import"), cli)
+stage = os.path.join(STAGE_ROOT, cli)
 if not os.path.isdir(stage): die(f"nothing staged at {stage}")
 p = PLAN[cli]
 env_dir = {"codex": os.environ.get("CODEX_HOME"), "claude": os.environ.get("CLAUDE_CONFIG_DIR")}.get(cli)
@@ -60,6 +75,7 @@ def kind_of(rel):
     inner = parts[2:] if parts[:2] == ["npm", "node_modules"] else parts  # Pi npm overlay lives under node_modules
     if parts[0] in SKIP_PARTS or set(inner) & {"__pycache__", "node_modules", ".git"}: return None
     for pat, k in allow:
+        if "*" in pat and "/" not in pat and "/" in rel: continue  # globs like *auth*.json: top-level files only
         if fnmatch.fnmatchcase(rel, pat): return k
     return None
 
@@ -75,8 +91,18 @@ if src_home:
     home_variants = sorted({s, s.replace("\\", "/"), s.replace("\\", "\\\\")}, key=len, reverse=True)
 ABS = re.compile(r'(/Users/[^/"\s]+|/home/(?!box\b)[^/"\s]+|[A-Za-z]:\\\\?Users\\\\?[^\\"\s]+|/Applications/|/opt/homebrew/|/Volumes/|/Library/|/System/|\.app/Contents/)')
 
+REWRITES = post_import.read_rewrites(STAGE_ROOT)
+auth_notes = {}  # names only: refs rewritten to env names, codex stores pinned
+
 def transform(data, rel, kind):
-    """Return (bytes, rewrites, leftover_abs_count). Auth/db files are left alone."""
+    """Return (bytes, rewrites, leftover_abs_count). Auth/db files keep their bytes, except resolved key refs."""
+    data, done = post_import.rewrite_refs(cli, rel, data, REWRITES)
+    if done: auth_notes.setdefault("refs_to_env_names", []).extend(f"{rel} {p}" for p in done)
+    if cli == "codex" and rel == "config.toml":
+        try:
+            t, changed = post_import.pin_codex_file_store(data.decode("utf-8")); data = t.encode("utf-8")
+            if changed: auth_notes["codex_file_store_pinned"] = changed
+        except UnicodeDecodeError: pass
     if kind in ("auth", "package", "overlay", "meta") or not rel.endswith(TEXT): return data, 0, 0
     try: t = data.decode("utf-8")
     except UnicodeDecodeError: return data, 0, 0
@@ -144,8 +170,13 @@ out = {"ok": True, "cli": cli, "dry_run": dry, "dest_root": dest_root, "skipped"
        "installed": [], "backups": [], "conflicts": conflicts}
 if cli == "omp" and any(x["rel"] == "agent.db" for x in plan) and not any(x["rel"] == "agent.db-wal" for x in plan):
     warnings.append("agent.db copied without agent.db-wal: fine if omp was closed on the other computer, otherwise recent logins may be missing")
-if cli == "claude" and not any(x["rel"] == ".credentials.json" for x in plan) and not os.path.exists(os.path.join(dest_root, ".credentials.json")):
-    warnings.append("no Claude credentials imported (macOS keeps them in Keychain); run `claude auth login` on the box")
+if cli == "claude" and ".credentials.json" not in staged_rels and not os.path.exists(os.path.join(dest_root, ".credentials.json")):
+    warnings.append("Claude login not copied (default): log in on the box with `claude auth login` (setup-agents headless recipe)")
+if cli == "codex" and "auth.json" not in staged_rels and not os.path.exists(os.path.join(dest_root, "auth.json")):
+    warnings.append("Codex login not copied (default): log in on the box with `codex login --device-auth` (setup-agents headless recipe)")
+claude_login = cli == "claude" and any(x["rel"] == ".credentials.json" for x in plan)
+if claude_login and not any(x["rel"] == "_home/.claude.json" for x in plan):
+    warnings.append("Claude login copied without ~/.claude.json: the account fields (oauthAccount) are missing, so Claude may ask to log in or onboard")
 
 # --- omp: don't replace a working box login with a dead one -------------------------------------
 def omp_creds(d):
@@ -254,7 +285,10 @@ if conflicts and not overwrite:
     out["planned"] = compact([x["rel"] for x in plan])
     if omp_auth: out["omp_auth"] = omp_auth
     summarize_skipped(); print(json.dumps(out, indent=2)); sys.exit(4)
+pending_keys = post_import.merge_agent_keys(STAGE_ROOT, dry=True)
 if dry:
+    if pending_keys: out["agent_keys"] = dict(pending_keys, note="merged into ~/.agent-keys on the real run (or `apply_import.sh keys`)")
+    if auth_notes: out["auth"] = auth_notes
     out["planned"] = [{"rel": x["rel"], "kind": x["kind"], "dest": x["dest"], "home_rewrites": x.get("rewrites", 0), "overwrites": x["rel"] in conflicts} for x in plan]
     out["planned"] = compact(out["planned"])
     if dep_dirs: out["planned"]["npm_deps"] = dep_dirs
@@ -271,12 +305,15 @@ def ensure_dir(d):
     for x in [dest_root] if d.startswith(dest_root) else []:
         os.chmod(x, 0o700)
 
+if pending_keys:
+    out["agent_keys"] = post_import.merge_agent_keys(STAGE_ROOT)
 for x in plan:
     if x["kind"] == "merge":
         try: src = json.load(open(x["src"], encoding="utf-8"))
         except Exception: warnings.append(f"{x['rel']}: not valid JSON, skipped"); continue
         servers = src.get("mcpServers") or {}
-        if not servers: skipped.append({"path": x["rel"], "why": "no mcpServers to merge"}); continue
+        acct = {k: src[k] for k in ("oauthAccount", "hasCompletedOnboarding") if claude_login and k in src}
+        if not servers and not acct: skipped.append({"path": x["rel"], "why": "no mcpServers to merge"}); continue
         s = json.dumps(servers)
         for v in home_variants: s = s.replace(json.dumps(v)[1:-1], json.dumps(HOME)[1:-1])
         servers = json.loads(s)
@@ -289,9 +326,11 @@ for x in plan:
         if clash and not overwrite:
             warnings.append(f"mcpServers kept as on box (differ, rerun with --overwrite to replace): {clash}")
             servers = {k: v for k, v in servers.items() if k not in clash}
-        existing.update(servers); cur["mcpServers"] = existing
+        existing.update(servers)
+        if existing: cur["mcpServers"] = existing
+        cur.update(acct)  # account metadata for the copied login (no tokens); never printed
         tmp = dest + ".tmp"; json.dump(cur, open(tmp, "w", encoding="utf-8"), indent=2); os.chmod(tmp, 0o600); os.replace(tmp, dest)
-        out["installed"].append({"rel": x["rel"], "dest": dest, "merged_mcp_servers": sorted(servers)})
+        out["installed"].append({"rel": x["rel"], "dest": dest, "merged_mcp_servers": sorted(servers), **({"merged_account_fields": sorted(acct)} if acct else {})})
         continue
     dest = x["dest"]; ensure_dir(os.path.dirname(dest))
     if os.path.exists(dest): backup(dest)
@@ -308,13 +347,14 @@ if db_changed:
 if os.path.isdir(dest_root): os.chmod(dest_root, 0o700)
 if dep_dirs: out["deps_installed"] = install_deps()
 # packages, plugins, MCP binaries, Mac-only commands (post_import.py), then the parity check (parity_check.py)
-import post_import, parity_check
+import parity_check
 out["post_install"] = post_import.run(cli, stage, dest_root, warnings)
 
 if not noverify:
     cmd = p["verify"]
     try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
+        # with ~/.agent-keys loaded, as run-agent.sh does
+        r = subprocess.run(["bash", "-c", '[ -f "$HOME/.agent-keys" ] && . "$HOME/.agent-keys"; ' + cmd], capture_output=True, text=True, timeout=60)
         txt = (r.stdout + r.stderr).strip().splitlines()
         if cli == "pi": txt = [f"{len(txt)} lines of models listed"] if r.returncode == 0 else txt[-3:]
         out["verify"] = {"cmd": cmd, "rc": r.returncode, "out": [l[:160] for l in txt[:8]]}
@@ -323,7 +363,7 @@ if not noverify:
 
 out["parity"] = parity_check.check(cli)
 if not out["parity"]["ok"]:
-    warnings.append("parity check found breaking gaps: " + "; ".join(f"{g['item']}: {g['detail']}" for g in out["parity"]["gaps"] if g["impact"] == "breaking")[:400])
+    warnings.append("parity check found breaking gaps: " + "; ".join(f"{g['item']}: {g['detail']}" for g in out["parity"]["gaps"] + out["parity"].get("auth", []) if g["impact"] == "breaking")[:400])
 
 # central config
 cfg = os.path.join(here, "..", "..", "configure-agents", "scripts", "agents_config.py")
@@ -339,11 +379,16 @@ elif any(i.get("kind") == "auth" for i in out["installed"]):
 else:
     out["config"] = "unchanged (no auth file imported)"
 
+ROTATING = {"codex": ("auth.json", ".credentials.json"), "claude": (".credentials.json",), "pi": ("auth.json",), "omp": DB}[cli]
 out["two_machine_warning"] = ("The same login is now used on the box and the user's computer. These CLIs refresh OAuth tokens and "
-    "a refresh on one side can invalidate the other (Codex reports 'OAuth refresh token was rejected'). If either side gets "
-    "logged out, log in again there. A separate `login` on the box avoids this.") if any(i.get("kind") == "auth" for i in out["installed"]) else None
+    "a refresh on one side can invalidate the other (Codex reports 'OAuth refresh token was rejected'; OpenAI says not to share "
+    "one auth.json across machines). If either side gets logged out, log in again there. A separate `login` on the box avoids this.") \
+    if any(i.get("rel") in ROTATING for i in out["installed"]) else None
+if auth_notes: out["auth"] = auth_notes
 
 if not keep:
+    for x in plan:  # staged login files: overwrite before deleting
+        if x["kind"] == "auth": post_import.shred(x["src"])
     shutil.rmtree(stage, ignore_errors=True); out["stage_removed"] = stage
 if omp_auth: out["omp_auth"] = omp_auth
 summarize_skipped(); out["installed"] = compact(out["installed"])
