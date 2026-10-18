@@ -10,7 +10,13 @@ The CLIs must already be installed on the box (`setup-agents` 2-1). Scripts live
 - `apply_import.sh <cli> [--src-home <user home>] [--dry-run] [--overwrite] [--keep-stage] [--no-verify]` installs from
   `/workspace/uploads/agent-import/<cli>/`.
 - `stage_tar.py <bundle.tgz> [--cli <list>]` splits a tarball of home-relative paths into those stage dirs.
-  Use it for `--dereference` bundles or a whole-config bundle made on the user's computer.
+  Use it for `bundle_local.sh` / `--dereference` bundles made on the user's computer.
+- `detect_local.sh` and `bundle_local.sh` run **on the user's computer** (macOS/Linux, POSIX sh): Read the file and pass
+  its content verbatim to one machine Shell call as a heredoc, `sh -s -- <clis> <<'EOF'` … `EOF`.
+  `detect_local.sh` is read-only and prints JSON per CLI (`installed`, `version`, `has_auth`, `importable_auth`,
+  `has_config`, `present` names, `symlinks`, `note`). `bundle_local.sh` tars only the allowlist, dereferenced, into
+  `~/agent-import.tgz` (600) and prints size, member count and entry names. `import_plan.py --lint-scripts` checks
+  that both cover every allowlisted path.
 
 ## Rules
 
@@ -28,18 +34,21 @@ The CLIs must already be installed on the box (`setup-agents` 2-1). Scripts live
 ## Steps
 
 1. **Pick the computer.** `ListMachines`. Use a connected desktop (the one the user's message came from by default).
-   Phones can't do this. Get the OS and home dir with a harmless machine Shell call: `uname -s; echo $HOME`
-   (Windows: `$env:USERPROFILE`).
-2. **Pick CLIs** (one multiSelect card): Codex, Claude Code, Pi, omp. Pre-check the ones installed on the box.
-3. **Plan.** `python3 scripts/import_plan.py --os <os> --home <home> --cli <chosen>`. On the user's computer,
-   check which listed paths exist (`ls -la <paths>` / `Test-Path`, names only, never contents). For `dir/`
-   entries, list files with `find <dir> -type f -maxdepth 3`. Show the user a short table of what will be copied.
+   Phones can't do this. Run `detect_local.sh` there (one machine Shell call); it gives the OS, home dir and what
+   exists. Windows: get `$env:USERPROFILE` and use `Test-Path` on the `import_plan.py --os windows` paths.
+2. **Pick CLIs** (one multiSelect card): Codex, Claude Code, Pi, omp. Pre-check the ones found locally.
+3. **Plan.** Show the user a short table from the detect JSON (`present` names per CLI, what falls back to a login).
+   `python3 scripts/import_plan.py --os <os> --home <home> --cli <chosen>` lists the full allowlist and stage paths.
 4. **Prepare the source.**
    - **omp:** quit omp on the computer first, since `agent.db` is a live SQLite file. Also copy `agent.db-wal` and `agent.db-shm` if present.
    - **Claude on macOS:** the login is in the Keychain item `Claude Code-credentials`, not a file, so it can't be copied.
      Import settings only, then run `claude auth login` on the box (setup-agents headless recipe).
    - **Windows:** Claude may also keep it in Credential Manager. If `.credentials.json` is missing, fall back to login.
-5. **Copy.** One `CopyToBox` per file, with `box_path` set to the plan's `stage` path. The user approves each copy.
+5. **Copy (default: one bundle).** Run `bundle_local.sh <chosen>` on the computer, `CopyToBox` `~/agent-import.tgz` →
+   `/workspace/uploads/agent-import.tgz` (one approval), `rm -f ~/agent-import.tgz` on the computer, then
+   `python3 scripts/stage_tar.py /workspace/uploads/agent-import.tgz --cli <chosen>` and delete the box copy.
+   Per-file fallback (Windows, or `CODEX_HOME`/`CLAUDE_CONFIG_DIR` set): one `CopyToBox` per file, with `box_path` set
+   to the plan's `stage` path; the user approves each copy.
 6. **Dry run.** `bash scripts/apply_import.sh <cli> --src-home <home> --dry-run`. Show the planned files, skipped
    files and warnings (absolute paths from the other computer, a missing omp WAL file).
 7. **Apply.** Rerun without `--dry-run` (add `--overwrite` only after the user agrees). The script sets files to 600 and the
@@ -60,8 +69,8 @@ The CLIs must already be installed on the box (`setup-agents` 2-1). Scripts live
 ## Lessons from real imports
 
 - **macOS bundles** contain `._*` AppleDouble files and `.DS_Store`. The script drops them.
-- **Symlinked skills** (e.g. `~/.codex/skills/x -> ~/.agents/skills/x`) are skipped by a normal copy, because their
-  targets aren't imported. Use `import_plan.py --os <os> --home <home> --cli <clis> --dereference`. It prints the
+- **Symlinked skills** (e.g. `~/.codex/skills/x -> ~/.agents/skills/x`) are skipped by a per-file copy, because their
+  targets aren't imported. `bundle_local.sh` already dereferences them. For per-file imports use `import_plan.py --os <os> --home <home> --cli <clis> --dereference`. It prints the
   commands to list the links and bundle them with `tar czhf` (dereferenced, `-T` file list, `COPYFILE_DISABLE=1`) on the user's
   computer. Then `CopyToBox` the tarball (one approval), delete it on the computer, run `stage_tar.py` and `apply_import.sh`.
   Links that are dangling on the computer itself stay links and are skipped. `stage_tar.py` also works for a full

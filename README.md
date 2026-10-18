@@ -17,8 +17,8 @@ artifact paths.
 
 | Skill | What it does |
 |---|---|
-| `setup-agents` | Pick CLIs (multi-select), install only those, sign in (subscription takeover, API key via masked input, or import), choose default model/reasoning, write the config, run an OK test per CLI |
-| `import-agents` | Copy existing CLI logins and settings from your registered computer to the box, file by file, with an allowlist and your approval for each copy |
+| `setup-agents` | Detect the CLIs already set up on your computer, pick CLIs (multi-select), install only those, import them all with logins by default (or sign in per agent: subscription takeover, API key via masked input), keep model/reasoning native, write the config, run an OK test per CLI |
+| `import-agents` | Copy existing CLI logins and settings from your registered computer to the box as one allowlisted bundle (or file by file), with your approval for each copy |
 | `configure-agents` | Change models, reasoning, permission mode, routing, logins/keys and each CLI's native config |
 | `delegate-task` | Decide light vs heavy, route to a CLI (or the one you named), write a standalone brief, run it headless, report back. Includes read-only code review |
 | `agent-bridge-webhook` | Two-way handoff with agents on another machine or CI through a webhook routine; answers stream back to the caller's terminal over Tailscale (`grok-send-task --wait`), with sanitizing in both directions |
@@ -26,9 +26,11 @@ artifact paths.
 ## Flow
 
 1. **Install** the plugin from the Cursor marketplace (Settings → plugins in Grok Bot).
-2. **Set up** (`/setup-agents`): choose CLIs, sign in, pick models. API keys go through masked input
-   or `~/.agent-keys` (mode 600), **never into chat**. Model and reasoning default to **native**: no
-   flag is passed and each CLI's own (or imported) settings apply.
+2. **Set up** (`/setup-agents`): the bot checks which CLIs your computer already has, you choose CLIs, and
+   by default it imports all of them, logins included ("import everything from my computer"), in about four
+   approvals. CLIs not found locally, and Claude on macOS (Keychain), sign in on the box instead. API keys go
+   through masked input or `~/.agent-keys` (mode 600), **never into chat**. Model and reasoning default to
+   **native**: no flag is passed and each CLI's own (or imported) settings apply.
 3. **Delegate** (`/delegate-task`): "have pi translate the README", "analyze this log folder", "fix this bug".
 4. **Change settings** (`/configure-agents`): "set claude reasoning to max", "turn off omp".
 
@@ -109,8 +111,9 @@ Shared by every bot on the box. Keys are never stored, only env var names (`key_
 | Pi | `~/.pi/agent/auth.json`, `anthropic-auth.json`, `settings.json`, `models.json` (+ `AGENTS.md`, `prompts/`, `skills/`, `extensions/`) | Needs `@earendil-works/pi-coding-agent` (Node ≥ 22.19) |
 | omp | `~/.omp/agent/agent.db`, `config.yml`, `models.yml`, `mcp.json` | Quit omp first; `-wal`/`-shm` come along |
 
-Symlinked skill folders are bundled with `import_plan.py --dereference` (a `tar -h` tarball) and
-staged with `stage_tar.py`. Sessions, history, logs, caches, SSH keys and unrelated dotfiles are never
+`detect_local.sh` (read-only, names only) and `bundle_local.sh` run on your computer through one machine Shell
+call each. The bundle is one dereferenced `tar -h` tarball of the allowlist (symlinked skills become real files),
+copied with one `CopyToBox`, deleted on your computer, and staged with `stage_tar.py`. Sessions, history, logs, caches, SSH keys and unrelated dotfiles are never
 imported. Sharing one OAuth login across two machines can log one of them out when the token refreshes.
 
 ## Answers back in your terminal (Tailscale)
@@ -136,7 +139,7 @@ assets/logo.svg, logo.png
 docs/ux-flow.html, ux-flow.png
 skills/
   setup-agents/SKILL.md
-  import-agents/       SKILL.md, scripts/{import_plan.py, stage_tar.py, apply_import.sh}
+  import-agents/       SKILL.md, scripts/{import_plan.py, detect_local.sh, bundle_local.sh, stage_tar.py, apply_import.sh}
   configure-agents/    SKILL.md, scripts/agents_config.py
   delegate-task/       SKILL.md, scripts/{run-agent.sh, route.py, summarize_run.py}, references/
   agent-bridge-webhook/ SKILL.md, scripts/{bridge.py, bridge_server.py, bridge-serve.sh, setup-tailscale.sh, sanitize_result.py, send-task.sh, bridge.env.example}

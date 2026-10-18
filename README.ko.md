@@ -11,9 +11,10 @@ Grok Bot 박스(클라우드 컴퓨터)에서 **Claude Code · Codex CLI · Pi �
 
 1. **설치**: Cursor 마켓플레이스에서 설치합니다(Grok Bot 설정의 플러그인).
 2. **세팅** (`/setup-agents`)
-   - 2-1: 쓸 CLI를 고릅니다(복수 선택 카드). 고른 것만 설치합니다.
-   - 2-2: CLI마다 구독 로그인(Take over), API 키, **내 컴퓨터에서 가져오기**(`/import-agents`) 중 하나를 고릅니다. API 키는 마스킹 입력이나 `~/.agent-keys`(600)로 넣고, **채팅에는 절대 쓰지 않습니다**.
-   - 2-3: 기본 모델과 추론 레벨을 정합니다. 기본값은 **native**(플래그를 넘기지 않음)여서 각 CLI의 자체 설정이나 가져온 설정을 그대로 씁니다. 사용자가 고를 때만 값을 넣습니다. 그다음 중앙 config를 쓰고, CLI마다 OK 테스트를 돌립니다.
+   - 0: 등록된 컴퓨터에 어떤 CLI와 로그인·설정 파일이 있는지 확인합니다(`detect_local.sh`, 읽기 전용, 파일 이름만).
+   - 2-1: 쓸 CLI를 고릅니다(복수 선택 카드). 내 컴퓨터에 있는 것은 미리 체크돼 있습니다. 고른 것만 설치합니다.
+   - 2-2: 카드 하나로 **내 컴퓨터에서 전부 가져오기 (추천)** 또는 **에이전트별로 고르기**를 고릅니다. 가져오기는 허용 목록만 묶은 tar 하나를 복사해서 로그인까지 한 번에 옮깁니다(승인 4번 정도). 내 컴퓨터에 없는 CLI와 macOS의 Claude(키체인)는 박스에서 로그인합니다. API 키는 마스킹 입력이나 `~/.agent-keys`(600)로 넣고, **채팅에는 절대 쓰지 않습니다**.
+   - 2-3: 기본 모델과 추론 레벨은 **native**(플래그를 넘기지 않음)여서 각 CLI의 자체 설정이나 가져온 설정을 그대로 씁니다. 가져온 경우엔 이 카드를 건너뜁니다. 그다음 중앙 config를 쓰고, CLI마다 OK 테스트를 돌립니다.
 3. **명시적 지시** (`/delegate-task`): 지목한 CLI로 바로 실행합니다. 일이 가벼워도 지목이 우선입니다.
 4. **자동 라우팅**: 가벼운 일은 봇이 직접 하고, 무거운 일만 활성화된 CLI에 맡깁니다. 반복·대량 작업은 Pi/omp 저가 모델, 어려운 추론·코드는 Claude/Codex, 장시간 무인 작업은 omp, 리뷰는 만들지 않은 쪽 에이전트가 맡습니다. 쓸 수 있는 CLI가 적으면 폴백 규칙을 따릅니다.
 5. **설정 변경** (`/configure-agents`): 모델, 추론 레벨, 권한 모드, 라우팅, 로그인/키 교체, 각 CLI의 native config를 바꿉니다.
@@ -29,7 +30,7 @@ grok-bot-agents/
     ├── setup-agents/SKILL.md
     ├── import-agents/
     │   ├── SKILL.md
-    │   └── scripts/import_plan.py, stage_tar.py, apply_import.sh   # 파일 목록 / tar 스테이징 / 설치
+    │   └── scripts/import_plan.py, detect_local.sh, bundle_local.sh, stage_tar.py, apply_import.sh   # 파일 목록 / 감지 / 묶기 / tar 스테이징 / 설치
     ├── configure-agents/
     │   ├── SKILL.md
     │   └── scripts/agents_config.py        # 중앙 config CLI (init/show/get/set/enable/disable/validate)
@@ -62,7 +63,7 @@ grok-bot-agents/
 
 사용자가 이미 쓰는 CLI 로그인과 설정을 등록된 컴퓨터에서 박스로 복사합니다. CLI마다 다시 로그인하지 않아도 됩니다.
 
-- `ListMachines`로 컴퓨터를 고르고 `CopyToBox`로 파일을 하나씩 복사합니다. 복사할 때마다 사용자 승인을 받습니다. 봇은 토큰 파일 내용을 출력하지 않습니다.
+- `ListMachines`로 컴퓨터를 고르고, 그 컴퓨터에서 `detect_local.sh`(읽기 전용)로 있는 파일 이름을 확인합니다. `bundle_local.sh`가 허용 목록만 심볼릭 링크를 풀어 `~/agent-import.tgz`(600) 하나로 묶고, `CopyToBox` 한 번으로 옮긴 뒤 컴퓨터에서 지웁니다. Windows 등에서는 파일을 하나씩 복사합니다. 복사할 때마다 사용자 승인을 받습니다. 봇은 토큰 파일 내용을 출력하지 않습니다.
 - `import_plan.py`가 OS와 홈 경로를 받아 가져올 파일 목록을 출력합니다(파일은 읽지 않음). `apply_import.sh`가 `/workspace/uploads/agent-import/<cli>/`에서 설치합니다.
   - 허용 목록에 있는 파일만 설치하고, 권한은 600/700으로 맞춥니다.
   - 기존 파일과 다르면 멈춥니다. `--overwrite`를 주면 `*.bak.<ts>`로 백업한 뒤 덮어씁니다.

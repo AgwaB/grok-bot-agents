@@ -1,6 +1,6 @@
 ---
 name: setup-agents
-description: First-time setup of coding-agent CLIs (Claude Code, OpenAI Codex CLI, Pi, Oh My Pi/omp) on the Grok Bot box. Pick agents (multi-select), install only those, sign in with a subscription or an API key without exposing keys in chat, set default model and reasoning level, write the central config ~/.grok-bot-agents/config.json, and verify each with a cheap OK run. Use when the user asks to install, connect, set up or log in to Codex, Claude Code, Pi, pi agent, oh-my-pi or omp, or says "connect Codex to my bot" or "install pi agent with DeepSeek".
+description: First-time setup of coding-agent CLIs (Claude Code, OpenAI Codex CLI, Pi, Oh My Pi/omp) on the Grok Bot box. By default it detects the CLIs already set up on the user's registered computer and imports them, logins included, in one go; otherwise it signs in with a subscription or an API key without exposing keys in chat. Picks agents (multi-select), installs only those, keeps model and reasoning native, writes the central config ~/.grok-bot-agents/config.json, and verifies each with a cheap OK run. Use when the user asks to install, connect, set up or log in to Codex, Claude Code, Pi, pi agent, oh-my-pi or omp, or says "connect Codex to my bot", "use my local setup" or "install pi agent with DeepSeek".
 ---
 
 # Set up agent CLIs on the box
@@ -15,9 +15,22 @@ Config helper (in the sibling skill, same plugin):
 If `~/.grok-bot-agents/config.json` already exists, show `$CFG show` and ask whether to add
 agents or reconfigure. For changes to an existing setup, use `configure-agents`.
 
+## 0 · Detect the user's local setup (before 2-1)
+
+The default path is **import everything from the user's computer**, logins included, so they don't log in again.
+1. `ListMachines`. Use a connected desktop (default: the one the user's last message was sent from). No connected
+   desktop, or only phones: skip to 2-1 and use the per-agent path in 2-2.
+2. Run **one** read-only machine Shell call with `../import-agents/scripts/detect_local.sh`: Read the file and pass
+   its content verbatim as a heredoc, `sh -s -- claude codex pi omp <<'DETECT'` … `DETECT`. It only tests whether
+   the `import_plan.py` paths exist (names, never contents) and runs `<cli> --version`. It prints one JSON line:
+   `os`, `home`, and per CLI `installed`, `version`, `has_auth`, `importable_auth`, `has_config`, `present`,
+   `symlinks`, `note`. Windows: use `Test-Path` on the `import_plan.py --os windows` paths instead.
+3. A CLI counts as **found locally** when it has `importable_auth` or `has_config`. Claude on macOS has
+   `importable_auth: false` (its login is in the Keychain); its settings can still be imported.
+
 ## 2-1 · Pick agents (multi-select card)
 
-Check what is already installed:
+Check what is already on the box:
 
 ```bash
 export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
@@ -26,7 +39,8 @@ node -v; npm -v; bun -v 2>/dev/null || echo "no bun"
 ```
 
 Then show **one multiSelect question card** (the app's question tool with multiple selection on).
-Don't ask in plain text. Pre-check the ones already installed. Options:
+Don't ask in plain text. Pre-check the ones found locally (step 0) or installed on the box, and mark the
+locally found ones "(내 컴퓨터에 있음)". Options:
 - **Claude Code**: hard implementation, design, tricky bugs (Claude plan or API key)
 - **Codex CLI**: implementation, review, second opinion (ChatGPT plan or API key)
 - **Pi**: light and fast, for repetitive or bulk work on cheap models (provider API key)
@@ -67,18 +81,49 @@ Install **only** the chosen ones:
 
 Then: `$CFG init --enable <chosen,comma,separated>` (or `$CFG enable <agent>` when adding to an existing config).
 
-## 2-2 · Sign in or set an API key (per agent)
+## 2-2 · Sign in: import from the computer by default
 
-For each chosen agent, ask (one question card) **subscription login**, **API key**, or **import from my computer**.
-Import copies the user's existing local login and settings for that CLI. Use the `import-agents` skill for it,
-then come back here for 2-3 and verification.
+Ask **one** question card for all chosen agents together (not one card per agent):
+- **내 컴퓨터에서 전부 가져오기 (추천)**: first option, shown when any chosen CLI was found locally. List which
+  CLIs it covers, and which fall back to a login on the box (not found locally, Claude on macOS).
+- **에이전트별로 고르기**: then one card per agent with subscription login, API key or import.
+
+Without a connected computer, or when nothing was found locally, skip this card and go straight to the per-agent cards.
+
+### Import everything (default)
+
+Say once, before copying: the same login will then be used on two machines. These CLIs refresh OAuth tokens, and a
+refresh on one side can log the other out. If that happens, log in again there.
+1. Install the chosen CLIs that are missing on the box (2-1 table). For omp, ask the user to quit omp on the computer.
+2. **Bundle on the computer** (one machine Shell call): pass `../import-agents/scripts/bundle_local.sh` verbatim the same
+   way, `sh -s -- <found clis> <<'BUNDLE'` … `BUNDLE`. It tars only the allowlisted paths, dereferenced (symlinked
+   skills become real files), into `~/agent-import.tgz` (600), and prints only size, member count and entry names.
+   Skip it for a CLI whose note says `CODEX_HOME`/`CLAUDE_CONFIG_DIR` is set; import that one per file (`import-agents`).
+3. **One `CopyToBox`**: `~/agent-import.tgz` → `/workspace/uploads/agent-import.tgz`. Then delete it on the computer
+   with one more machine Shell call: `rm -f ~/agent-import.tgz`. Each machine Shell and CopyToBox call needs the user's
+   approval; tell them up front that it's about four approvals in total (detect, bundle, copy, delete), not one per file.
+4. On the box: `python3 ../import-agents/scripts/stage_tar.py /workspace/uploads/agent-import.tgz --cli <clis>`, then
+   `rm -f /workspace/uploads/agent-import.tgz`.
+5. Per CLI: `bash ../import-agents/scripts/apply_import.sh <cli> --src-home <home> --dry-run`, then without
+   `--dry-run`. On exit 4 (conflicts), list the files, ask, and rerun with `--overwrite` (it backs them up). The script
+   records `auth: imported` and model/reasoning `native` when the status check passes.
+6. **Fallbacks:** CLIs not found locally, and Claude on macOS (settings imported, login in the Keychain), get a
+   subscription login on the box (headless recipe below) or an API key. Env-var API keys (e.g. Pi or omp providers
+   using `DEEPSEEK_API_KEY`) aren't in these files: ask which env names they use, then have the user enter values through
+   the masked secret input (API key steps below).
+
+Details, rules and lessons: the `import-agents` skill. Never print, `cat` or summarize auth files; copy only the allowlist.
+
+### Per agent (when chosen, or without a connected computer)
+
+For each chosen agent, ask (one question card) **subscription login**, **API key**, or **import from my computer**
+(the `import-agents` skill for that CLI).
 
 | Option | When |
 |---|---|
 | Subscription login | Separate login on the box. Safest: no shared tokens. |
 | API key | Provider key, entered through the masked input or `~/.agent-keys`. |
 | Import from my computer | The user already uses that CLI on a registered computer. Not possible for Claude on macOS (Keychain). |
-
 
 | Agent | Subscription login (user finishes via Take over) | API key env | Check |
 |---|---|---|---|
@@ -118,15 +163,16 @@ long-lived token the user would then have to store as `CLAUDE_CODE_OAUTH_TOKEN` 
 
 Record the choice: `$CFG set agents.<a>.auth oauth` or `$CFG set agents.<a>.auth api_key agents.<a>.key_env DEEPSEEK_API_KEY` (an import sets `imported` itself).
 
-Say once: subscription sessions are stored on the box (cloud) and shared by all bots. The CLI's own
+Say once: logins are stored on the box (cloud) and shared by all bots. The CLI's own
 terms of service apply. Don't suggest using the box to get around provider account rules or region limits.
 
 ## 2-3 · Default model and reasoning level
 
-Default is **native**: `model` and `reasoning` stay `null`, so the runner passes no flag and each CLI uses its own
-settings (its config file, or what was imported). Ask per agent (one card: model and reasoning, preselected
-"native / CLI default"). Only set a value when the user picks one. `native` and `null` mean the same.
-List models with `pi --list-models <provider>` / `omp models <provider>`. Don't invent model IDs.
+Default is **native**: `model` and `reasoning` stay `null` (or `native`), so the runner passes no flag and each CLI uses
+its own settings (its config file, or what was imported). After an import, **skip this card**: say in one line that the
+imported model and reasoning settings are kept, and that `configure-agents` changes them. Otherwise ask per agent (one
+card: model and reasoning, preselected "native / CLI default"), and only set a value when the user picks one, or when
+they ask. List models with `pi --list-models <provider>` / `omp models <provider>`. Don't invent model IDs.
 
 | Agent | Reasoning values (flag the runner passes) |
 |---|---|

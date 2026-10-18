@@ -7,7 +7,7 @@ Each entry: source path on the user's computer -> staging path on the box
 (/workspace/uploads/agent-import/<cli>/<rel>), plus kind (auth|config|extra|dir|merge), and notes.
 Copy only what exists (check with `test -e` / `Test-Path` on the user's machine first).
 """
-import argparse, json, sys
+import argparse, json, re, sys
 
 STAGE = "/workspace/uploads/agent-import"
 
@@ -91,7 +91,19 @@ def main():
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--dereference", action="store_true",
                     help="print commands to bundle symlinked skill dirs as real files (tar -h) on the user's computer")
+    ap.add_argument("--lint-scripts", action="store_true",
+                    help="check that detect_local.sh and bundle_local.sh cover every path in PLAN (dev check)")
     a = ap.parse_args()
+    if a.lint_scripts:
+        import os
+        here = os.path.dirname(os.path.abspath(__file__)); bad = []
+        for script in ("detect_local.sh", "bundle_local.sh"):
+            text = open(os.path.join(here, script), encoding="utf-8").read()
+            for c, p in PLAN.items():
+                for rel, _, _ in p["files"]:
+                    name = ".claude.json" if rel.startswith("../") else rel.rstrip("/")
+                    if not re.search(r"(?<![\w.-])" + re.escape(name) + r"(?![\w-])", text): bad.append(f"{script}: {c} {rel}")
+        print("\n".join(bad) if bad else "scripts cover every PLAN path"); sys.exit(1 if bad else 0)
     clis = [c.strip() for c in a.cli.split(",") if c.strip()]
     bad = [c for c in clis if c not in PLAN]
     if bad: sys.exit(f"unknown cli: {bad}")

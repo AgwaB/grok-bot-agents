@@ -8,7 +8,12 @@ First release.
   masked API keys in `~/.agent-keys`, or import; native model/reasoning by default; OK test per CLI.
 - `import-agents`: allowlisted import of CLI logins and settings from a registered computer
   (`import_plan.py`, `apply_import.sh`), `--dereference` for symlinked skills (`stage_tar.py`),
-  macOS metadata and symlinks skipped, conflicts stop unless `--overwrite`.
+  macOS metadata and symlinks skipped, conflicts stop unless `--overwrite`. `detect_local.sh` (read-only,
+  names only) and `bundle_local.sh` (one dereferenced allowlist tarball, one `CopyToBox`) run on the user's computer;
+  `import_plan.py --lint-scripts` keeps them in sync with the allowlist.
+- `setup-agents` first run defaults to importing: detect local CLIs, pre-check them, one "import everything from my
+  computer" card for all chosen agents, per-agent cards only on request or without a computer, and no model card
+  after an import.
 - `configure-agents`: central `~/.grok-bot-agents/config.json` (`agents_config.py`).
 - `delegate-task`: light/heavy rules, `route.py` auto-routing with rate-limit state and fallback,
   headless runner with worktree-per-task, per-run work dirs, full-auto/safe/read-only modes,
