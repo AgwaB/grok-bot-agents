@@ -4,6 +4,8 @@
 
 First release.
 
+- Windows import is supported but less tested than macOS/Linux; the docs and the
+  import flow now say it may not go smoothly and point to box login as the fallback.
 - Import regression coverage (still **0.1.0**): research on eight open-source
   projects, a 64-scenario matrix, and an isolated offline runner
   (`tests/run_import_tests.sh`). 60 Python tests (59 passed, PowerShell skipped

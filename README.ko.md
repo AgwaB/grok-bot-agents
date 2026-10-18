@@ -63,7 +63,7 @@ grok-bot-agents/
 
 사용자가 이미 쓰는 CLI 로그인과 설정을 등록된 컴퓨터에서 박스로 복사합니다. CLI마다 다시 로그인하지 않아도 됩니다.
 
-- `ListMachines`로 컴퓨터를 고르고, 그 컴퓨터에서 `detect_local.sh`(읽기 전용)로 있는 파일 이름을 확인합니다. `bundle_local.sh`가 허용 목록만 심볼릭 링크를 풀어 `~/agent-import.tgz`(600) 하나로 묶고, `CopyToBox` 한 번으로 옮긴 뒤 컴퓨터에서 지웁니다. Windows 등에서는 파일을 하나씩 복사합니다. 복사할 때마다 사용자 승인을 받습니다. 봇은 토큰 파일 내용을 출력하지 않습니다.
+- `ListMachines`로 컴퓨터를 고르고, 그 컴퓨터에서 `detect_local.sh`(읽기 전용)로 있는 파일 이름을 확인합니다. `bundle_local.sh`가 허용 목록만 심볼릭 링크를 풀어 `~/agent-import.tgz`(600) 하나로 묶고, `CopyToBox` 한 번으로 옮긴 뒤 컴퓨터에서 지웁니다. Windows 등에서는 파일을 하나씩 복사합니다. Windows는 지원하지만 테스트가 적어 원활하지 않을 수 있고, 안 되면 박스에서 직접 로그인하면 됩니다. 복사할 때마다 사용자 승인을 받습니다. 봇은 토큰 파일 내용을 출력하지 않습니다.
 - `import_plan.py`가 OS와 홈 경로를 받아 가져올 파일 목록을 출력합니다(파일은 읽지 않음). `apply_import.sh`가 `/workspace/uploads/agent-import/<cli>/`에서 설치합니다.
   - 허용 목록에 있는 파일만 설치하고, 권한은 600/700으로 맞춥니다.
   - 기존 파일과 다르면 멈춥니다. `--overwrite`를 주면 `*.bak.<ts>`로 백업한 뒤 덮어씁니다.

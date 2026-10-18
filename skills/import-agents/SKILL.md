@@ -98,6 +98,9 @@ terminal via **Take over**; the localhost callback works because the browser is 
 1. **Pick the computer.** `ListMachines`. Use a connected desktop (the one the user's message came from by default).
    Phones can't do this. Run `detect_local.sh` there (one machine Shell call; `detect_local.ps1` on Windows); it gives
    the OS, home dir, what exists and the name-only secret inventory.
+   **Windows:** supported, but less tested than macOS/Linux (no native Windows run yet). Tell the user once, in one
+   line, that import from Windows may not go smoothly and that setup-agents' box login or API key is the fallback
+   if a step fails. Then continue normally.
 2. **Pick CLIs** (one multiSelect card): Codex, Claude Code, Pi, omp. Pre-check the ones found locally.
 3. **Plan + consent card.** Show a short table from the detect JSON (`present` names per CLI; Claude/Codex get a box
    login by default). Then the one consent card (Auth above) built from `secrets.inventory`, `env_refs` and `env_set`:

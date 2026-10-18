@@ -18,7 +18,7 @@ artifact paths.
 | Skill | What it does |
 |---|---|
 | `setup-agents` | Detect the CLIs already set up on your computer, pick CLIs (multi-select), install only those, import them all by default (settings, consented API keys, Pi/omp logins; Claude Code and Codex log in on the box unless you opt in to copying), or sign in per agent (subscription takeover, API key via masked input), keep model/reasoning native, write the config, run an OK test per CLI |
-| `import-agents` | Copy existing CLI settings, consented API keys and logins from your registered computer (macOS, Linux, Windows) to the box as one allowlisted bundle (or file by file), with your approval for each copy |
+| `import-agents` | Copy existing CLI settings, consented API keys and logins from your registered computer (macOS, Linux; Windows works but is less tested) to the box as one allowlisted bundle (or file by file), with your approval for each copy |
 | `configure-agents` | Change models, reasoning, permission mode, routing, logins/keys and each CLI's native config |
 | `delegate-task` | Decide light vs heavy, route to a CLI (or the one you named), write a standalone brief, run it headless, report back. Includes read-only code review |
 | `agent-bridge-webhook` | Two-way handoff with agents on another machine or CI through a webhook routine; answers stream back to the caller's terminal over Tailscale (`grok-send-task --wait`), with sanitizing in both directions |

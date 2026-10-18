@@ -26,7 +26,7 @@ the box** by default (no two-machine refresh conflict; Anthropic's ToS wants its
    its content verbatim as a heredoc, `sh -s -- claude codex pi omp <<'DETECT'` … `DETECT`. It only tests whether
    the `import_plan.py` paths exist (names, never contents) and runs `<cli> --version`. It prints one JSON line:
    `os`, `home`, per CLI `installed`, `version`, `has_auth`, `importable_auth`, `has_config`, `login_store`, `present`,
-   `symlinks`, `auth_status`, `note`, and `secrets` (a name-only inventory for the consent card). Windows:
+   `symlinks`, `auth_status`, `note`, and `secrets` (a name-only inventory for the consent card). Windows (supported but less tested; mention once that import may not go smoothly and box login is the fallback):
    `../import-agents/scripts/detect_local.ps1`, passed as `& ([scriptblock]::Create(@'` … `'@)) -Clis claude,codex,pi,omp`.
 3. A CLI counts as **found locally** when it has `importable_auth` or `has_config`. For Claude and Codex the login
    itself isn't imported by default (`login_store` says where it lives); their settings are.
