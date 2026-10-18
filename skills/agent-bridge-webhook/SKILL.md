@@ -51,6 +51,33 @@ The webhook URL and its sender key are in the routine panel. The user copies the
 never sees the key and must not ask for it. On the caller machine they go in
 `~/.config/grok-agents/bridge.env` (template: `scripts/bridge.env.example`, `chmod 600`), never in a repo.
 
+## Guided setup (default): the user only pastes two values
+
+Do every step yourself. The only thing the user does is copy the Webhook URL and Authorization header from the
+routine panel into the terminal you open. The bot can't read the key, so that one paste can't be skipped.
+Don't ask the user to run commands, edit files or find panels.
+
+1. **Routine.** Create it (section 2). The user approves the card.
+2. **Caller machine.** `ListMachines` and pick the computer the user's message came from. CopyFromBox
+   `send-task.sh` to `~/.local/bin/grok-send-task`, then on that machine run
+   `mkdir -p ~/.config/grok-agents && chmod 755 ~/.local/bin/grok-send-task`. If `~/.local/bin` isn't on PATH,
+   use the full path in the next steps.
+3. **Already configured?** Run `grok-send-task --check` on that machine. If it prints `config ok`, skip to step 6.
+4. **Open the setup terminal for them.**
+   - macOS: `osascript -e 'tell application "Terminal" to activate' -e 'tell application "Terminal" to do script "~/.local/bin/grok-send-task --setup"'`
+   - Linux desktop: `x-terminal-emulator -e ~/.local/bin/grok-send-task --setup &` (or `gnome-terminal --`).
+   - If that fails (macOS may ask once to allow Terminal automation), say so in one line and give the single command to paste.
+5. **Send the two panel links** in one short message, using the field links from the routine's status
+   (`grokbot://app/v1/sidebar?target=webhook-url&automation=<folder>` and `target=webhook-header`). Say: copy each one,
+   paste into the terminal that just opened, press Enter. Then wait: poll `grok-send-task --check` on that
+   machine every ~10 s for up to 5 minutes (one Shell call with a loop). Never ask for the values in chat.
+6. **Round trip.** Run `grok-send-task "Reply with exactly: BRIDGE OK"` on that machine, then wait for
+   `/workspace/agent-bridge/outbox/<request_id>.md` on the box (loop up to ~3 minutes) and confirm it says `BRIDGE OK`.
+7. **Report** in 2–3 lines: works or doesn't, and how to use it (`grok-send-task "할 일" [context-file]`).
+   On failure, show the error line from `--check` or curl and fix it yourself where possible.
+
+CI callers (GitHub Actions) can't be set up this way: tell the user which three secrets to add.
+
 ## 3. Caller side
 
 `scripts/send-task.sh "task" [context-file]` posts one request and prints its `request_id`. It
