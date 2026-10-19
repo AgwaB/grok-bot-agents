@@ -118,7 +118,13 @@ The runner:
 - no `--cwd`, or `--cwd` isn't a repo: works in `<run-dir>/work`. A non-repo `--cwd` and every `--input DIR` are passed as extra readable dirs (`--add-dir` for Claude, Codex and omp; Pi gets the absolute paths in the brief)
 - reads model, reasoning, permission and timeout from the config (arguments win) and loads `~/.agent-keys`.
   Model or reasoning at `native`/`null` means no flag is passed: the CLI's own settings apply
-- prints a JSON summary: status (`ok`, `error`, `timeout`, `rate_limited`), permission, model, reasoning, branch, `changed_files` (repo), `artifacts` (files created in the work dir, up to 100), a summary of at most 1500 chars, session_id, run_dir
+- Pi: turns on pi's auto-retry for that run only (`pi_retry` in the summary says `on` or why it was skipped).
+  It writes a work-dir `.pi/settings.json` with just `{"retry":{"enabled":true}}` (merged over the user's
+  `~/.pi/agent/settings.json`, which is never changed), passes `--approve`, keeps both files out of git with a
+  self-ignoring `.pi/.gitignore`, and removes them after the run. Skipped for `--review` and when the work dir
+  already has its own trust-gated `.pi` files or `.agents/skills`; their trust stays the user's decision
+- Pi/omp exit 0 even when they stop on an error, so the last message's `stopReason` decides the status
+- prints a JSON summary: status (`ok`, `error`, `timeout`, `rate_limited`), `error_kind` (`conn_error` when the run ended on a dropped connection or model stream) and `resumable`, permission, model, reasoning, branch, `changed_files` (repo), `artifacts` (files created in the work dir, up to 100), a summary of at most 1500 chars, session_id, run_dir
 
 Permission flags (checked on codex 0.163.0, Claude Code 2.1.197, pi 1.3.0, omp 18.12.1):
 
@@ -163,21 +169,26 @@ limits). A subagent that waits in Shell keeps the box awake, so long runs get a 
 |---|---|
 | `running` (`reason=budget_used`) | dispatch the next supervisor right away, same brief |
 | `done` / `failed` | the run ended: read `meta.json` and report (section 5). `reason=died_no_meta` means it died without a summary, usually a box pause or restart: restart it |
+| `failed` (`reason=conn_error`) | the run ended on a dropped connection or model stream (WebSocket error, idle timeout, ECONNRESET, socket hang up, fetch failed, ...), usually after a box pause: restart it right away, no need to ask |
 | `stalled` | no output and no CPU for 10 minutes: restart it |
 
-Restart a stalled or died run with `resume-run.sh`. Start it as a background Shell command, like `run-agent.sh`:
+Every line with `resumable=1` (`stalled`, `died_no_meta`, `conn_error`) gets the restart below. A run you
+started without a supervisor that returns `error_kind: conn_error` gets the same treatment.
+
+Restart a stalled, died or `conn_error` run with `resume-run.sh`. Start it as a background Shell command, like `run-agent.sh`:
 
 ```bash
-bash scripts/resume-run.sh <id> --kill [-- --timeout 7200]   # --dry-run shows the plan first
+bash scripts/resume-run.sh <id> --kill [-- --timeout 7200]   # --dry-run shows the plan first; --kill is harmless if the run already ended
 ```
 
 It stops what is left of the old process tree, commits the work in progress on `agent/<id>`, and starts a
 new run `<id>-r2` (then `-r3`, ...) from that worktree. The new run uses the same agent, model and reasoning
 and the original brief plus a continuation note ("check what is done, don't start over"). Then supervise
-the new id. After 2 restarts of the same task, stop and tell the user.
+the new id. Tell the user in one line that it was restarted and why. Stalls, deaths and `conn_error` share one
+cap: after 2 restarts of the same task, stop and tell the user.
 
 `supervise.sh` line: `status=running|done|failed|stalled next=continue|return run_dir=DIR reason=... idle=Ns
-cpu_delta=Ns forks=N remaining=Ns`. Details go to `<run-dir>/supervise.log`. Options: `--slice S` (one call,
+cpu_delta=Ns forks=N remaining=Ns resumable=0|1`. Details go to `<run-dir>/supervise.log`. Options: `--slice S` (one call,
 default 600), `--interval S` (30), `--stall-min M` (10).
 
 ## 5. Report back
@@ -195,6 +206,12 @@ default 600), `--interval S` (30), `--stall-min M` (10).
   don't keep it awake. See the [forum thread](https://forum.cursor.com/t/grok-bot-computer-freezes-reboots-repeatedly-and-kills-24-7-background-scripts/174272).
 - **Subagents seem to have a run cap of about 1 hour** (observed, not documented). One subagent kept the box
   awake for 57 minutes, then was interrupted and the box restarted. Hence the 30-minute supervisor rotation.
+- **Pauses over about 75 s break pi's model stream.** Measured by freezing pi (SIGSTOP) mid-answer with
+  `openai-codex`: 20 to 75 s, the stream picks up and the run finishes; 90 s to 3 min, it ends with `WebSocket
+  error`; 5 min or more, `WebSocket idle timeout after 300000ms` right after waking. pi still exits 0. With retry
+  on, pi reconnected 2 s after a 3-minute freeze and finished. The runner turns retry on per run (section 4), and
+  a run that still ends on a connection error comes back as `conn_error` and is resumed automatically (within
+  the cap of 2 restarts). Codex, Claude Code and omp were not measured (omp has its own `retry.enabled` setting, on by default).
 - A box restart kills every run. `supervise.sh` then reports `failed reason=died_no_meta`; restart with
   `resume-run.sh`. Only committed or saved work survives in the worktree.
 

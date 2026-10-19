@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Restart a run that stalled or died (for example after a box VM pause): stop what is left of it,
+# Restart a run that stalled, died, or ended on a dropped connection (for example after a box VM pause): stop what is left of it,
 # commit its work in progress on branch agent/<id>, and relaunch run-agent.sh from that worktree
 # with a continuation brief. Start this script itself as the background Shell command; it ends in
 # run-agent.sh and prints the same JSON summary.
@@ -119,7 +119,7 @@ BRIEF="$R/continue-$NEW_ID.md"
   awk '/^---$/ {hold=$0; getline nxt; if (nxt ~ /^(Inputs|Review mode|CONTINUATION:)/) exit; print hold; print nxt; next} {print}' "$R/prompt.md"
   echo
   echo "---"
-  echo "CONTINUATION: an earlier run of this task ($OLD_ID) was interrupted before it finished (the machine paused or the process stalled)."
+  echo "CONTINUATION: an earlier run of this task ($OLD_ID) was interrupted before it finished (the machine paused, the process stalled, or its model connection dropped)."
   if [ "$KIND" = repo ]; then
     echo "Its work so far is already in this worktree: committed on this branch (see \`git log\` and \`git show --stat HEAD\`)."
   else

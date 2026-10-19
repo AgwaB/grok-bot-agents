@@ -10,6 +10,14 @@ First release.
   (commit WIP on `agent/<id>`, relaunch with a continuation brief). `run-agent.sh` writes
   `agent.pid`/`runner.pid`. New "Known limits" section: idle VM pauses, a suspected ~1 hour
   subagent cap.
+- Pi survives idle pauses better (still **0.1.0**): `run-agent.sh` turns pi's auto-retry on per run
+  (a work-dir `.pi/settings.json` with only `retry.enabled`, `--approve`, a self-ignoring `.pi/.gitignore`,
+  removed after the run; `~/.pi/agent/settings.json` is never touched; skipped for `--review` and for work dirs
+  with their own trust-gated pi files). `summarize_run.py` now uses the last message's `stopReason` even when
+  it has partial text (pi exits 0 on errors) and flags dropped connections/streams as `error_kind: conn_error`,
+  `resumable: true`; `supervise.sh` reports `failed reason=conn_error resumable=1` and the bot resumes such runs
+  with `resume-run.sh` (same 2-restart cap). Known limits: freezes up to ~75 s are fine, 90 s+ break the stream;
+  a real 180 s freeze recovered via retry.
 - Windows import is supported but less tested than macOS/Linux; the docs and the
   import flow now say it may not go smoothly and point to box login as the fallback.
 - Import regression coverage (still **0.1.0**): research on eight open-source

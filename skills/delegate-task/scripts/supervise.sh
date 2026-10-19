@@ -9,8 +9,10 @@
 #   --interval S seconds between checks (default 30)
 #   --stall-min M  no output growth and no CPU for M minutes = stalled (default 10)
 # Output (stdout, one line):
-#   status=running|done|failed|stalled next=continue|return run_dir=DIR reason=... idle=Ns cpu_delta=Ns forks=N remaining=Ns
+#   status=running|done|failed|stalled next=continue|return run_dir=DIR reason=... idle=Ns cpu_delta=Ns forks=N remaining=Ns resumable=0|1
 #   next=continue: call again.  next=return: stop and hand the line back (budget used, or run ended / stalled).
+#   failed reason=conn_error: the run ended on a dropped connection or model stream (meta.json error_kind).
+#   resumable=1: restart it with resume-run.sh (conn_error, died_no_meta, stalled).
 # Exit: 0 running|done, 1 failed, 2 stalled, 64 usage error. Details go to <run-dir>/supervise.log.
 set -uo pipefail
 
@@ -21,7 +23,7 @@ while [ $# -gt 0 ]; do
     --slice) SLICE="$2"; shift 2;;
     --interval) INTERVAL="$2"; shift 2;;
     --stall-min) STALL_MIN="$2"; shift 2;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0;;
     -*) echo "status=failed next=return run_dir= reason=usage:unknown_arg_$1"; exit 64;;
     *) if [ -z "$ARG" ]; then ARG="$1"; else MAX="$1"; fi; shift;;
   esac
@@ -52,7 +54,9 @@ now() { date +%s; }
 ts() { date '+%F %T'; }
 
 emit() {  # status next reason [exit]
-  local line="status=$1 next=$2 run_dir=$R reason=$3 idle=${IDLE:-0}s cpu_delta=${CPUD:--1}s forks=${FORKS:--1} remaining=${REM:-0}s"
+  local res=0
+  case "$1:$3" in stalled:*|failed:conn_error|failed:died_no_meta) res=1;; esac
+  local line="status=$1 next=$2 run_dir=$R reason=$3 idle=${IDLE:-0}s cpu_delta=${CPUD:--1}s forks=${FORKS:--1} remaining=${REM:-0}s resumable=$res"
   [ -d "$R" ] && echo "$(ts) $line" >> "$LOG"
   [ "$2" = return ] && rm -f "$DLF"
   echo "$line"
@@ -121,7 +125,8 @@ echo "$(ts) slice start max=${MAX}s deadline=$(date -d "@$DEADLINE" '+%T') stall
 while :; do
   T=$(now); REM=$((DEADLINE - T)); [ "$REM" -lt 0 ] && REM=0
   if [ -f "$R/meta.json" ]; then
-    st=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status","error"))' "$R/meta.json" 2>/dev/null || echo error)
+    # status, or error_kind when set (conn_error = dropped connection/stream, resumable)
+    st=$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m.get("error_kind") or m.get("status") or "error")' "$R/meta.json" 2>/dev/null || echo error)
     [ "$st" = ok ] && emit "done" return ok
     emit failed return "$st"
   fi

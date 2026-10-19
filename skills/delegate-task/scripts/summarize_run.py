@@ -40,8 +40,13 @@ def last_text_from_jsonl(text):
                 stack.extend(o)
     return last
 
+LAST_STOP = {}  # pi/omp: stopReason and errorMessage of the last assistant message
+
 def pi_like_final(text):
-    """pi/omp --mode json: take text parts of the last message_end with role assistant (pi docs/json.md)."""
+    """pi/omp --mode json: take text parts of the last message_end with role assistant (pi docs/json.md).
+    pi exits 0 even when that last message stopped on an error (for example a dropped model stream after a
+    VM pause), sometimes with partial text, so the last message's stopReason decides, not the exit code.
+    With auto-retry, a failed attempt is followed by another assistant message; only the last one counts."""
     last = None
     for line in text.splitlines():
         try:
@@ -51,14 +56,17 @@ def pi_like_final(text):
         if isinstance(ev, dict) and ev.get("type") == "message_end":
             m = ev.get("message") or {}
             if m.get("role") == "assistant":
+                LAST_STOP.clear(); LAST_STOP.update(stop=m.get("stopReason"), error=m.get("errorMessage"))
                 parts = [c.get("text") for c in m.get("content", []) if isinstance(c, dict) and c.get("type") == "text" and c.get("text")]
-                if parts:
-                    last = "\n".join(parts)
-                elif m.get("stopReason") == "error" or m.get("errorMessage"):
-                    # failed turn (quota, auth, bad model): surface the provider error instead of an empty summary
-                    last = "error: " + str(m.get("errorMessage") or "unknown error").strip()[:1200]
+                if m.get("stopReason") in ("error", "aborted") or m.get("errorMessage"):
+                    # failed turn (quota, auth, bad model, dropped stream): surface the provider error, keep any partial text after it
+                    last = "error: " + str(m.get("errorMessage") or m.get("stopReason") or "unknown error").strip()[:1200]
                     who = "/".join(x for x in (m.get("provider"), m.get("model")) if x)
                     if who: last += f" (model {who})"
+                    if parts:
+                        last += "\n\nPartial output before the error:\n" + "\n".join(parts)
+                elif parts:
+                    last = "\n".join(parts)
     return last
 
 result, session = None, None
@@ -118,18 +126,29 @@ if os.environ.get("REVIEW_MODIFIED"):
     status = "error"
     result = "REVIEW MODE VIOLATION: the reviewed directory changed during a read-only review. Inspect it with git status.\n" + (result or "")
 # Quota or rate limits (e.g. Claude "You've hit your weekly limit", HTTP 429): tell the bot to fall back.
-_errtxt = (result or "") + (open(os.path.join(run_dir, "stderr.log"), encoding="utf-8", errors="replace").read()[-4000:] if os.path.exists(os.path.join(run_dir, "stderr.log")) else "")
+_errtxt = (result or "").split("\n\nPartial output before the error:\n")[0] + (open(os.path.join(run_dir, "stderr.log"), encoding="utf-8", errors="replace").read()[-4000:] if os.path.exists(os.path.join(run_dir, "stderr.log")) else "")
 if status == "error" and re.search(r"(hit your (weekly|daily|usage|session) limit|usage limit|rate.?limit|quota|\b429\b|too many requests|insufficient_quota|credit balance is too low)", _errtxt, re.I):
     status = "rate_limited"
     try:  # remember it so route.py skips this agent until the reset time
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import route
         _pat = r"(hit your (weekly|daily|usage|session) limit|usage limit|rate.?limit|quota|\b429\b|too many requests|insufficient_quota|credit balance is too low)"
-        _msg = next((l for l in ((result or "") + "\n" + _errtxt).splitlines() if re.search(_pat, l, re.I)), _errtxt[-300:])
+        _msg = next((l for l in _errtxt.splitlines() if re.search(_pat, l, re.I)), _errtxt[-300:])
         route.mark_limited(agent, message=_msg.strip()[:300])
     except Exception:
         pass
-meta = {"agent": agent, "status": status, "permission": os.environ.get("PERM"), "model": os.environ.get("MODEL") or None,
+# Dropped connection or model stream (VM pause, network blip): the task itself is fine, so the bot resumes
+# it with resume-run.sh. pi/omp: judge by the last message's error; others: the result text and stderr tail.
+CONN_RE = (r"websocket|idle timeout|\bECONN(RESET|REFUSED|ABORTED)\b|\bETIMEDOUT\b|\bEPIPE\b|\bEAI_AGAIN\b|\bENOTFOUND\b|\bENETUNREACH\b"
+           r"|\bEHOSTUNREACH\b|socket hang ?up|fetch failed|network (error|connection|is unreachable)|connection (error|reset|closed|lost|refused)"
+           r"|stream (disconnected|closed|ended|error)|premature close|other side closed|terminated|\bUND_ERR|transport failure|provider_transport_failure")
+error_kind, resumable = None, False
+if status == "error" and not os.environ.get("REVIEW_MODIFIED"):
+    _conn_txt = str(LAST_STOP["error"]) if LAST_STOP.get("error") else _errtxt
+    if re.search(CONN_RE, _conn_txt, re.I):
+        error_kind, resumable = "conn_error", True
+meta = {"agent": agent, "status": status, "error_kind": error_kind, "resumable": resumable,
+        "last_stop_reason": LAST_STOP.get("stop") if LAST_STOP else None, "pi_retry": os.environ.get("PI_RETRY") or None, "permission": os.environ.get("PERM"), "model": os.environ.get("MODEL") or None,
         "reasoning": os.environ.get("REASONING") or None, "worktree_branch": os.environ.get("WORKTREE"), "exit_code": rc, "seconds": secs, "run_dir": run_dir,
         "kind": os.environ.get("KIND"), "workdir": workdir, "session_id": session,
         "changed_files": changed, "artifacts": artifacts,

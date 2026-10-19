@@ -124,6 +124,37 @@ if [ ${#EXTRA[@]} -gt 0 ]; then
   fi
 fi
 
+# pi auto-retry for this run only (a VM pause of 90 s or more kills pi's model stream; with retry on, pi
+# reconnects about 2 s after waking). pi has no per-run settings flag, so the runner drops a project
+# .pi/settings.json with only {"retry":{"enabled":true}} into the work dir (deep-merged over the user's
+# ~/.pi/agent/settings.json, which is never touched) and passes --approve so print mode loads it.
+# Skipped when the work dir already has trust-gated pi resources (their trust stays the user's call),
+# for --review (the reviewed dir must not change), and for a pi without --approve. A self-ignoring
+# .pi/.gitignore keeps both files out of the agent's commits; they are removed after the run.
+PI_RETRY="" PI_RETRY_FILES=()
+pi_retry_setup() {
+  local d="$WORKDIR/.pi" e cur home
+  [ "$KIND" = review ] && { PI_RETRY="skipped: review runs in place"; return 1; }
+  for e in settings.json mcp.json extensions skills prompts themes SYSTEM.md APPEND_SYSTEM.md .gitignore; do
+    [ -e "$d/$e" ] && { PI_RETRY="skipped: work dir already has .pi/$e"; return 1; }
+  done
+  home="$(cd "$HOME" 2>/dev/null && pwd -P)"; cur="$(cd "$WORKDIR" && pwd -P)"
+  while :; do   # pi also trust-gates project .agents/skills in the work dir or any parent (not ~/.agents/skills)
+    [ -e "$cur/.agents/skills" ] && [ "$cur" != "$home" ] && { PI_RETRY="skipped: $cur/.agents/skills needs project trust"; return 1; }
+    [ "$cur" = / ] && break; cur="$(dirname "$cur")"
+  done
+  pi --help 2>/dev/null | grep -q -- '--approve' || { PI_RETRY="skipped: this pi has no --approve"; return 1; }
+  [ -d "$d" ] || { mkdir "$d" && PI_RETRY_FILES+=("$d"); }
+  if ! { printf '{"retry": {"enabled": true}}\n' > "$d/settings.json" && printf 'settings.json\n.gitignore\n' > "$d/.gitignore"; }; then
+    rm -f "$d/settings.json" "$d/.gitignore"; PI_RETRY="skipped: could not write $d"; return 1
+  fi
+  PI_RETRY_FILES=("$d/settings.json" "$d/.gitignore" ${PI_RETRY_FILES[@]+"${PI_RETRY_FILES[@]}"})
+  PI_RETRY="on"
+}
+pi_retry_cleanup() {  # files first, then the .pi dir only if the runner created it and it is empty
+  local f; for f in ${PI_RETRY_FILES[@]+"${PI_RETRY_FILES[@]}"}; do if [ -d "$f" ]; then rmdir "$f" 2>/dev/null; else rm -f "$f"; fi; done
+}
+
 P="$(cat "$RUN_DIR/prompt.md")"
 CMD=()
 case "$AGENT" in
@@ -158,6 +189,7 @@ case "$AGENT" in
     [ -n "$MODEL" ] && CMD+=(--model "$MODEL")
     [ -n "$REASONING" ] && CMD+=(--thinking "$REASONING")
     [ -n "$RESUME" ] && CMD+=(--session "$RESUME")
+    pi_retry_setup && CMD+=(--approve)
     CMD+=("$P");;
   omp)
     # full-auto: --approval-mode yolo | safe: --approval-mode write (exec-tier calls fail closed headless, no hang)
@@ -184,10 +216,11 @@ echo "$AGENT_PID" > "$RUN_DIR/agent.pid"; echo "$$" > "$RUN_DIR/runner.pid"
 wait "$AGENT_PID"
 RC=$?
 END=$(date +%s)
+pi_retry_cleanup
 
 REVIEW_MODIFIED=""
 if [ -n "$REVIEW" ]; then [ "$(fingerprint "$WORKDIR")" = "$FP_BEFORE" ] || REVIEW_MODIFIED=1; fi
-SUMMARY=$(REVIEW_MODIFIED="$REVIEW_MODIFIED" AGENT="$AGENT" PERM="$PERM" MODEL="$MODEL" REASONING="$REASONING" WORKTREE="$WORKTREE" KIND="$KIND" \
+SUMMARY=$(PI_RETRY="$PI_RETRY" REVIEW_MODIFIED="$REVIEW_MODIFIED" AGENT="$AGENT" PERM="$PERM" MODEL="$MODEL" REASONING="$REASONING" WORKTREE="$WORKTREE" KIND="$KIND" \
   python3 "$(dirname "$0")/summarize_run.py" "$AGENT" "$RUN_DIR" "$RC" "$((END-START))" "$WORKDIR"); SRC=$?
 # A rate-limited repo run that changed nothing: drop its empty worktree and branch so a retry starts clean.
 if [ "$KIND" = repo ] && printf '%s' "$SUMMARY" | grep -q '"status": "rate_limited"' && [ -z "$(git -C "$WORKDIR" status --porcelain 2>/dev/null)" ]; then
