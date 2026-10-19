@@ -1,66 +1,56 @@
 ---
 name: configure-agents
-description: Show and change the agent setup in ~/.grok-bot-agents/config.json, including enabled agents, default model, reasoning level, permission mode (full-auto or safe), routing preferences and timeout. Also rotates logins and API keys and edits each CLI's own config (Codex config.toml, Claude settings.json, Pi settings.json, omp config.yml/models.yml). Use when the user asks what's configured, or says "change pi's model", "claude reasoning to max", "switch to safe mode", "prefer codex", "rotate my DeepSeek key", "re-login Claude", or "disable omp".
+description: Inspect or change shared agent models, reasoning, permissions, routing, enabled agents and timeout; guide approved login/key rotation and native config edits. Use for reconfiguration rather than first-time setup.
 ---
 
 # Configure agents
 
-All bots share one config: `~/.grok-bot-agents/config.json`. `delegate-task` reads it on
-every run, so changes apply from the next run. No restart needed.
+From this SKILL.md's absolute folder, resolve the complete plugin at `../..` and invoke
+`python3 <root>/scripts/gba` (**gba**). A standalone copy needs absolute `GBA_ROOT` pointing at
+all plugin scripts/helpers; stop if missing. Never resolve relative to an arbitrary Shell cwd.
+The config helper is `<root>/skills/configure-agents/scripts/agents_config.py` (**CFG** below).
 
-```bash
-CFG="python3 scripts/agents_config.py"      # from this skill's folder
-$CFG show                                   # always start by showing the current summary
-```
+Start with `gba doctor --json`; shared `~/.grok-bot-agents/config.json` changes affect the next run.
+`python3 <CFG> show` gives native/override preferences; never inspect raw auth/config files for diagnosis.
 
-## Change settings (central config)
+## Central settings (no secret values)
 
-`set` takes one or more key/value pairs, validates once at the end, and refuses anything that looks
-like a secret value.
+`python3 <CFG> set KEY VALUE [KEY VALUE …]` validates the entire update before saving.
+Secret-looking values are refused in **every field**, including nested values: known key prefixes,
+Bearer/JWT/private-key markers and long high-entropy tokens. This is conservative detection, not proof
+that arbitrary text is safe; false positives are possible. Success prints a field count, **never raw values**.
+`key_env` must be an environment-variable name. Use secure secret entry, never config/argv, for keys.
 
-| Ask | Command |
+| Setting | Example |
 |---|---|
-| Change a model | `$CFG set agents.pi.model deepseek/<model-id>` (`native` or `null` = pass no flag; the CLI's own config decides) |
-| Reasoning level | `$CFG set agents.claude.reasoning max` (claude: low/medium/high/xhigh/max · codex: minimal/low/medium/high/xhigh · pi: off/minimal/low/medium/high/xhigh · omp: those + max/auto) | Use `native` to go back to the CLI's own setting.
-| Permission mode | `$CFG set permission_mode safe` or `full-auto` |
-| Enable / disable an agent | `$CFG enable omp` · `$CFG disable codex` |
-| Routing | `$CFG set routing.prefer '["codex"]'` · `$CFG set routing.mode ask` · `$CFG set routing.mode fixed routing.fixed claude` |
-| Cheap / hard pools | `$CFG set routing.cheap '["pi"]' routing.hard '["claude","codex"]'` |
-| Timeout | `$CFG set timeout_sec 3600` |
+| Model | `set agents.pi.model deepseek/<verified-model-id>`; `native`/`null` means no runner flag |
+| Reasoning | `set agents.pi.reasoning max` |
+| Permission | `set permission_mode safe` or `full-auto` |
+| Enabled | `enable omp` / `disable codex` |
+| Routing | `set routing.mode ask`; `set routing.mode fixed routing.fixed claude` |
+| Pools/preference | `set routing.cheap '["pi"]' routing.hard '["claude","codex"]' routing.prefer '["codex"]'` |
+| Timeout | `set timeout_sec 3600` |
 
-`worktree_per_task` can't be turned off. Validation rejects `false`.
+Reasoning enums: Claude `low/medium/high/xhigh/max`; Codex `minimal/low/medium/high/xhigh`;
+Pi `off/minimal/low/medium/high/xhigh/max`; omp adds `auto` to Pi's list. All accept `native`/`null`.
+Actual model support varies; discover IDs with the CLI, do not invent them.
+`worktree_per_task` must remain true. Before full-auto, explain unrestricted shell/network/login access;
+worktrees are not a sandbox. Push, deploy, PRs, messages and spending still need separate approval.
 
-Before switching to **full-auto**, remind the user in one line: agents then run every shell command
-without asking. Worktrees isolate git, not the system. Push, deploy and PR still need their OK.
-Show `$CFG show` after every change.
+## Login, keys and native files
 
-List valid model IDs before setting one: `pi --list-models <provider>`, `omp models <provider>`.
-Don't guess model names.
+The user completes `claude auth login`, `codex login --device-auth`, Pi `/login` or `omp login`
+through **Take over** in a persistent box terminal. Ask before logout; never request secrets in chat.
+API-key rotation uses masked input or takeover + `read -rsp`. Replace only the selected assignment in
+`~/.agent-keys`, preserve other names and mode 600; never print values or duplicate assignments.
+Record `agents.<a>.auth` and `agents.<a>.key_env` only. See setup-agents for the consent/login boundary.
 
-## Rotate logins and keys
+Only edit native config when requested or unsupported by runner flags; back it up first:
+Codex `~/.codex/config.toml`, Claude `~/.claude/settings.json`, Pi `~/.pi/agent/settings.json`,
+omp `~/.omp/agent/config.yml` / `models.yml`. Honor the CLI directory overrides.
+Central non-native model/reasoning wins over these files. Settings-only imports preserve central overrides;
+never silently clear one or claim imported defaults automatically apply.
 
-| What | How |
-|---|---|
-| Claude subscription | `claude auth logout` → `claude auth login` (user finishes via Take over) · check `claude auth status` |
-| Codex subscription | `codex logout` → `codex login --device-auth` · check `codex login status` |
-| omp login | `omp login` · check `omp usage` |
-| API key (any) | User re-enters it through the masked secret input, or Take over + `read -rsp`. Replace the old `export NAME=` line in `~/.agent-keys` (keep `chmod 600`) |
-| Switch auth type | `$CFG set agents.pi.auth api_key agents.pi.key_env OPENROUTER_API_KEY` |
-
-Never show key values. `$CFG show` only reports whether each `key_env` is set.
-
-## Native CLI configs (only when the user asks, or a setting has no runner flag)
-
-The runner always passes the permission flags. It passes model and reasoning flags only when they're set here.
-At `native`/`null` the CLI's native file decides (e.g. Codex `model_reasoning_effort`, Pi `defaultThinkingLevel`),
-so to change those defaults, either set a value here (it overrides) or edit the native file.
-Edit native files only for things outside it (providers, MCP servers, tool policies). Back up the file first.
-
-| CLI | File | Notes |
-|---|---|---|
-| Codex | `~/.codex/config.toml` (`$CODEX_HOME`) | keys checked with `--strict-config`: `model`, `model_reasoning_effort`, `sandbox_mode` (read-only / workspace-write / danger-full-access), `approval_policy` (untrusted / on-failure / on-request / granular / never). Per-run override: `-c key=value` |
-| Claude Code | `~/.claude/settings.json` (project: `.claude/settings.json`, `.claude/settings.local.json`) | path confirmed from the Claude Code 2.1.197 binary. `permissions.defaultMode` and `effortLevel` keys exist (full schema not checked). Per-run: `--settings <file\|json>` |
-| Pi | `~/.pi/agent/settings.json` (project: `.pi/settings.json`) | from pi docs: `defaultProvider`, `defaultModel`, `defaultThinkingLevel`. Dir override `PI_CODING_AGENT_DIR` |
-| omp | `~/.omp/agent/config.yml` (settings; `settings.json` there is legacy and gets migrated) · `~/.omp/agent/models.yml` (custom providers) | from omp 18.12.1 source: `tools.approvalMode` defaults to `yolo`; `models.yml` providers use `baseUrl`, `api`, `apiKey` (env var name). Per-run: `--config <overlay.yml>`, per-bot isolation: `--profile` |
-
-After editing a native file, re-run the cheap OK check from `setup-agents` for that agent.
+After a change run `gba verify --agents <changed-agents>` offline. With explicit provider-use permission,
+add `--live` for an exact-OK check; report auth/quota/failure separately. Do not dump CLI diagnostics,
+auth files, agent.db, secrets.env, ~/.agent-keys or sensitive native configuration.

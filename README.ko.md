@@ -2,7 +2,7 @@
 
 English: [README.md](README.md)
 
-Grok Bot 박스(클라우드 컴퓨터)에서 **Claude Code · Codex CLI · Pi · omp(Oh My Pi)** 를 설치하고 로그인하는 스킬 전용 플러그인입니다.
+Grok Bot 박스(클라우드 컴퓨터)에서 **Claude Code · Codex CLI · Pi · omp(Oh My Pi)** 를 설치하고 로그인하는 스킬 + 얇은 Python `gba` CLI 플러그인입니다. 버전은 **0.1.0** 그대로입니다.
 가벼운 일은 Grok Bot이 직접 하고, **무거운 일은 코딩이든 아니든 CLI에 맡깁니다**. 리서치·분석, 데이터·파일 처리, 대량 변환, 긴 초안이나 번역, 로그 분석, 장시간 작업이 모두 해당됩니다.
 맡기는 방식은 두 가지입니다. **직접 지목**("codex한테 시켜")하거나 Grok Bot이 **자동 라우팅**하게 둡니다.
 실행은 헤드리스로 하고, 결과는 요약과 산출물 경로로 받아요.
@@ -11,10 +11,10 @@ Grok Bot 박스(클라우드 컴퓨터)에서 **Claude Code · Codex CLI · Pi �
 
 1. **설치**: Cursor 마켓플레이스에서 설치합니다(Grok Bot 설정의 플러그인).
 2. **세팅** (`/setup-agents`)
-   - 0: 등록된 컴퓨터에 어떤 CLI와 로그인·설정 파일이 있는지 확인합니다(`detect_local.sh`, 읽기 전용, 파일 이름만).
+   - 0: 등록된 컴퓨터의 CLI와 로그인·설정을 감지합니다. 스캐너는 내용을 내부에서 읽지만 **이름만 출력**합니다.
    - 2-1: 쓸 CLI를 고릅니다(복수 선택 카드). 내 컴퓨터에 있는 것은 미리 체크돼 있습니다. 고른 것만 설치합니다.
-   - 2-2: 카드 하나로 **내 컴퓨터에서 전부 가져오기 (추천)** 또는 **에이전트별로 고르기**를 고릅니다. 가져오기는 허용 목록만 묶은 tar 하나를 복사합니다(승인 4~5번 정도). 설정, 동의 카드(이름만 표시)에서 고른 API 키(`~/.agent-keys`, 600), Pi/omp 로그인이 옮겨집니다. Claude Code와 Codex 구독 로그인은 기본으로 박스에서 따로 로그인하고, 복사는 옵션입니다. 키와 토큰은 **채팅에 절대 쓰지 않습니다**.
-   - 2-3: 기본 모델과 추론 레벨은 **native**(플래그를 넘기지 않음)여서 각 CLI의 자체 설정이나 가져온 설정을 그대로 씁니다. 가져온 경우엔 이 카드를 건너뜁니다. 그다음 중앙 config를 쓰고, CLI마다 OK 테스트를 돌립니다.
+   - 2-2: 가져오기 또는 에이전트별 로그인을 선택합니다. **파일 전체 단위 동의** 후 선택된 파일만 고유 스테이징 경로로 옮기며, CopyToBox마다 승인받습니다. 한 auth 파일의 일부 제공자만 선택할 수 없습니다. env 키는 내보내기 전에 이름별로 동의받아 `~/.agent-keys`(600)에 합칩니다. Claude/Codex 구독은 기본적으로 박스에서 별도 로그인합니다. 키/토큰은 **채팅에 쓰지 않습니다**.
+   - 2-3: 기본 모델/추론은 **native**입니다. 단, 기존 중앙 override는 설정만 가져왔을 때 유지됩니다. `gba verify`는 오프라인 검사이고, 명시적 허가 후 `--live`를 붙여야 제공자 OK 테스트를 합니다.
 3. **명시적 지시** (`/delegate-task`): 지목한 CLI로 바로 실행합니다. 일이 가벼워도 지목이 우선입니다.
 4. **자동 라우팅**: 가벼운 일은 봇이 직접 하고, 무거운 일만 활성화된 CLI에 맡깁니다. 반복·대량 작업은 Pi/omp 저가 모델, 어려운 추론·코드는 Claude/Codex, 장시간 무인 작업은 omp, 리뷰는 만들지 않은 쪽 에이전트가 맡습니다. 10분 넘는 실행은 감시 봇이 30분씩 교대로 지켜봐서 박스가 잠들지 않게 하고, 멈추면 이어서 다시 돌립니다. 쓸 수 있는 CLI가 적으면 폴백 규칙을 따릅니다.
 5. **설정 변경** (`/configure-agents`): 모델, 추론 레벨, 권한 모드, 라우팅, 로그인/키 교체, 각 CLI의 native config를 바꿉니다.
@@ -25,6 +25,7 @@ Grok Bot 박스(클라우드 컴퓨터)에서 **Claude Code · Codex CLI · Pi �
 grok-bot-agents/
 ├── .cursor-plugin/plugin.json
 ├── assets/logo.svg, logo.png
+├── scripts/gba, gba_{import,setup,runs,doctor}.py
 └── skills/
     ├── setup-agents/SKILL.md
     ├── import-agents/
@@ -64,12 +65,12 @@ grok-bot-agents/
 
 사용자가 이미 쓰는 CLI 로그인과 설정을 등록된 컴퓨터에서 박스로 복사합니다. CLI마다 다시 로그인하지 않아도 됩니다.
 
-- `ListMachines`로 컴퓨터를 고르고, 그 컴퓨터에서 `detect_local.sh`(읽기 전용)로 있는 파일 이름을 확인합니다. `bundle_local.sh`가 허용 목록만 심볼릭 링크를 풀어 `~/agent-import.tgz`(600) 하나로 묶고, `CopyToBox` 한 번으로 옮긴 뒤 컴퓨터에서 지웁니다. Windows 등에서는 파일을 하나씩 복사합니다. Windows는 지원하지만 테스트가 적어 원활하지 않을 수 있고, 안 되면 박스에서 직접 로그인하면 됩니다. 복사할 때마다 사용자 승인을 받습니다. 봇은 토큰 파일 내용을 출력하지 않습니다.
+- `ListMachines`로 컴퓨터를 고르고 이름만 표시하는 감지를 합니다. `gba import inventory` → `plan` → 승인된 파일별 CopyToBox → `advance` → `verify`로 진행하며, `status ID`로 재개합니다. SHA256으로 선택한 바이트를 확인하고 빠진/추가/변경 파일은 차단합니다. 심볼릭 링크나 외부 Pi 패키지는 모든 포함 파일에 동의한 경우에만 기존 bundle 경로를 별도로 검토합니다. Windows는 덜 검증됐으며 POSIX export/bundle 대체물이 없습니다. 실패하면 박스 로그인/마스킹 키 입력을 사용합니다.
 - `import_plan.py`가 OS와 홈 경로를 받아 가져올 파일 목록을 출력합니다(파일은 읽지 않음). `apply_import.sh`가 `/workspace/uploads/agent-import/<cli>/`에서 설치합니다.
   - 허용 목록에 있는 파일만 설치하고, 권한은 600/700으로 맞춥니다.
   - 기존 파일과 다르면 멈춥니다. `--overwrite`를 주면 `*.bak.<ts>`로 백업한 뒤 덮어씁니다.
   - 홈 경로를 박스 경로로 바꾸고, Claude `~/.claude.json`에서는 `mcpServers`만 병합합니다.
-  - 상태 확인을 통과하면 config에 `auth: imported`를 기록하고, 스테이징 사본을 지웁니다.
+  - 기존 직접 apply는 **인증 파일을 가져오고 상태 확인을 통과했을 때만** `auth: imported`와 native를 기록합니다. `gba import`는 오프라인 적용이므로 중앙 설정을 유지하고, 별도 verify 성공 후 해당 작업 스테이징만 지웁니다.
 
 | CLI | 가져오는 것 | 메모 |
 |---|---|---|
@@ -124,7 +125,7 @@ grok-bot-agents/
 ```
 
 - `model`/`reasoning`가 `null` 또는 `"native"`이면 플래그를 넘기지 않습니다. 각 CLI의 자체 설정(가져온 설정 포함)이 적용됩니다. 기본값이 이것입니다.
-- 값을 넣으면 실행할 때마다 플래그로 덮어씁니다(예: pi `--thinking low`). 가져오기를 하면 해당 CLI는 자동으로 `native`가 됩니다.
+- 값을 넣으면 실행할 때마다 덮어씁니다(예: pi `--thinking low`). 설정만 가져오면 기존 override가 유지되므로 자동으로 native가 된다고 약속하지 않습니다. Pi 추론은 `max`도 지원합니다.
 
 ## 권한 모드
 
@@ -138,6 +139,35 @@ grok-bot-agents/
 - 작업마다 worktree를 하나씩 씁니다(`agent/<run-id>` 브랜치). 이 설정은 항상 켜져 있고 끌 수 없습니다.
 - push, 머지, PR, 배포는 full-auto에서도 매번 사용자에게 확인합니다.
 - full-auto에서는 에이전트가 박스 셸, 네트워크, 로그인 세션에 제한 없이 접근합니다.
+
+## gba CLI
+
+Python **3.11+ 표준 라이브러리만** 사용합니다. 각 SKILL.md의 실제 절대 경로에서 `../..`를
+플러그인 루트로 계산해 `python3 <root>/scripts/gba`를 실행합니다. 스킬만 따로 복사했다면
+전체 플러그인을 가리키는 절대 `GBA_ROOT`가 필요합니다. Shell cwd에 의존하거나 없는 경로를 추측하지 않습니다.
+
+- `setup plan|apply --agents pi,codex`: plan은 파일 생성/CLI 실행/다운로드 없는 계획입니다.
+  apply만 선택한 CLI를 사용자 경로에 설치합니다. Linux/glibc 박스용이며 Node SHA256/npm SHA512
+  무결성을 확인하고 install 스크립트는 비활성화합니다. 기존 설정/미선택 CLI는 보존합니다.
+- `import inventory --agents … [--exported-keys]`: 소스에서 이름/해시만 수집합니다.
+  `import plan --inventory 파일 [--selection 선택파일]`, `advance ID`, `status ID`, `verify ID`를 사용합니다.
+  제공자별 부분 복사는 거부합니다. omp DB/WAL/SHM은 한 동의 단위입니다.
+  코드 신뢰 승인은 `--approve-runtime`, 덮어쓰기는 `--overwrite`, 중단 후 재시도는 `--retry-interrupted`입니다.
+- `runs list --open`, `runs next ID`, `runs recover ID`: 원래 입력/시간 제한, 계보/시도 횟수,
+  감시 봇 인계를 저장합니다. **계보 전체 자동 재시작 2회** 이후에는 사용자 동의와
+  `--allow-extra-restart`가 필요합니다. `--native`는 별도 선택입니다. 실제 감시 봇 배치/30분 교대는 봇이 합니다.
+- `doctor --json`, `verify --agents …`: 설정/실행 파일 버전/키 이름 존재 여부/parity 오프라인 검사입니다.
+  `verify --live`만 실제 제공자 호출을 하며 quota 부족은 성공으로 간주하지 않습니다.
+
+출력은 `schema:1`, `status:ok|blocked|error`, 고정 `reason`, `next_action`, `requires_approval`,
+`action_owner`를 담은 짧은 JSON입니다. 종료 코드는 각각 0/3/2입니다. 다음 행동은 **봇에게 주는 인계**이며
+자동 실행 명령이나 사용자 승인 증거가 아닙니다. [영문 계약/입력 예시](README.md#gba-cli)를 참고하세요.
+상태는 `~/.grok-bot-agents/imports/import-<uuid>/`에 비공개로 저장합니다. 중단된 apply는 효과를 검토한
+뒤 명시적으로 재개해야 하며 전체 롤백/정확히 한 번 실행을 보장하지 않습니다.
+`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `PI_CODING_AGENT_DIR` 변경 시 bundle 대신 파일별 복사를 사용합니다.
+`agents_config.py set`은 비밀키 패턴/긴 고엔트로피 값을 모든 필드에서 거부하며 값 대신 필드 수만 출력합니다.
+휴리스틱이므로 오탐/미탐 가능성이 있습니다. 브리지의 command/git 응답은 기록만 하고 **outbox만 구현**돼 있습니다.
+웹훅의 `reply_command`는 절대 실행하지 않습니다. 실설치/제공자/네이티브 플랫폼 테스트는 하지 않았습니다.
 
 ## 테스트
 
@@ -154,7 +184,7 @@ public GitHub 레포에 push한 뒤 https://cursor.com/marketplace/publish 에 �
 
 - `minClientVersions`에 Grok Bot 키를 넣어야 하는지
 - 앱의 multiSelect 질문 카드와 마스킹 시크릿 입력이 플러그인 스킬에서도 동작하는지
-- 스킬끼리의 상대 경로(`../configure-agents/scripts/...`)가 설치된 플러그인 안에서도 유지되는지
+- 마켓플레이스/독립 복사 설치에서 절대 GBA_ROOT 탐색의 실제 호스트 스모크 테스트
 - rate limit이 없는 계정에서 Claude Code end-to-end (Codex, Pi, omp는 확인됨)
 
 ## 라이선스

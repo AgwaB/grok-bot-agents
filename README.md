@@ -2,7 +2,7 @@
 
 # grok-bot-agents
 
-A skills-only Grok Bot plugin that installs, signs in and drives **Claude Code, Codex CLI, Pi and
+A Grok Bot skills plugin with a thin Python `gba` controller that installs, signs in and drives **Claude Code, Codex CLI, Pi and
 omp (Oh My Pi)** on the Grok Bot box (the bot's cloud computer).
 
 Grok Bot keeps light work for itself and hands **heavy work, coding or not,** to a CLI agent:
@@ -18,7 +18,7 @@ artifact paths.
 | Skill | What it does |
 |---|---|
 | `setup-agents` | Detect the CLIs already set up on your computer, pick CLIs (multi-select), install only those, import them all by default (settings, consented API keys, Pi/omp logins; Claude Code and Codex log in on the box unless you opt in to copying), or sign in per agent (subscription takeover, API key via masked input), keep model/reasoning native, write the config, run an OK test per CLI |
-| `import-agents` | Copy existing CLI settings, consented API keys and logins from your registered computer (macOS, Linux; Windows works but is less tested) to the box as one allowlisted bundle (or file by file), with your approval for each copy |
+| `import-agents` | Copy existing CLI settings, consented API keys and logins from your registered computer (macOS, Linux; Windows works but is less tested) to the box through a consent-bound, resumable per-file controller, with your approval for each copy |
 | `configure-agents` | Change models, reasoning, permission mode, routing, logins/keys and each CLI's native config |
 | `delegate-task` | Decide light vs heavy, route to a CLI (or the one you named), write a standalone brief, run it headless, report back. Includes read-only code review, and supervisors that keep long runs alive through box idle pauses |
 | `agent-bridge-webhook` | Two-way handoff with agents on another machine or CI through a webhook routine; answers stream back to the caller's terminal over Tailscale (`grok-send-task --wait`), with sanitizing in both directions |
@@ -27,8 +27,8 @@ artifact paths.
 
 1. **Install** the plugin from the Cursor marketplace (Settings → plugins in Grok Bot).
 2. **Set up** (`/setup-agents`): the bot checks which CLIs your computer already has, you choose CLIs, and
-   by default it imports all of them ("import everything from my computer") in about four or five approvals:
-   settings, the API keys you tick on one name-only consent card (into `~/.agent-keys`, mode 600), and Pi/omp logins.
+   offers imports, and moves only files selected on a whole-file consent card, with approval for each transfer:
+   settings, approved API-key exports (into `~/.agent-keys`, mode 600), and selected Pi/omp auth files.
    Claude Code and Codex subscriptions get their own login on the box by default; copying them is an opt-in. Keys
    and tokens **never go into chat**. Model and reasoning default to
    **native**: no flag is passed and each CLI's own (or imported) settings apply.
@@ -46,7 +46,10 @@ A task is heavy if **any** of these hold; otherwise the bot does it itself:
 
 ## Routing
 
-`scripts/route.py decide` applies the rules, the config and the rate-limit state:
+`skills/delegate-task/scripts/route.py decide` applies the rules, config and rate-limit state.
+It returns `decision`, nullable `agent`, optional `ask_first`, and optional object-shaped `skipped`.
+`--type bulk` alone is not heavy: also pass `--bulk` or a threshold.
+
 
 | Heavy-work type | First choice | Fallback |
 |---|---|---|
@@ -112,12 +115,19 @@ Shared by every bot on the box. Keys are never stored, only env var names (`key_
 | Pi | `~/.pi/agent/auth.json`, package auth files (`*auth*.json`, `*token*.json`, `web-search*.json`, …), `settings.json`, `models.json`, packages (+ `AGENTS.md`, `prompts/`, `skills/`, `extensions/`) | Needs `@earendil-works/pi-coding-agent` (Node ≥ 22.19) |
 | omp | `~/.omp/agent/agent.db`, `config.yml`, `models.yml`, `mcp.json` | Quit omp first; `-wal`/`-shm` come along |
 
-`detect_local.sh` (read-only, names only; `detect_local.ps1` on Windows), `export_secrets.sh` (only the consented
-keys, values straight into 600 files) and `bundle_local.sh` run on your computer through one machine Shell call each.
-Env-var keys and `!command`/`op://` keys you tick are merged into the box `~/.agent-keys`. The bundle is one dereferenced `tar -h` tarball of the allowlist (symlinked skills become real files),
-copied with one `CopyToBox`, deleted on your computer, and staged with `stage_tar.py`. Sessions, history, logs, caches, SSH keys and unrelated dotfiles are never
-imported, and neither are browser-profile logins or cloud credentials. Sharing one OAuth login across two machines can
-log one of them out when the token refreshes, which is why Claude Code and Codex default to a box login.
+Scanners read config/auth contents internally but emit only names (`detect_local.ps1` on Windows).
+Consent is **whole-file**, including every provider/secret inside an auth/config file; omp DB/WAL/SHM is one unit.
+Partial provider selections are rejected. Env/indirection exports select names before creating the export file.
+The controller uses unique private staging, SHA256 receipts and approved per-file CopyToBox transfers.
+Legacy bundles remain an explicit fallback for fully consented symlinked skills/external packages, not partial
+selections; nondefault `CODEX_HOME`, `CLAUDE_CONFIG_DIR` or `PI_CODING_AGENT_DIR` requires per-file copying.
+Windows is less tested and has no POSIX bundle/export twin: use per-file import or box login/masked keys.
+Never import browser logins, SSH/GPG/cloud credentials, history, caches or unrelated files.
+Sharing OAuth across machines can log one out on refresh; Claude/Codex default to separate box login.
+
+Settings-only imports preserve central overrides. Direct `apply_import.sh` resets model/reasoning to native
+only after imported auth passes its status check. `gba import` applies offline (`--no-verify`) and preserves
+central defaults; inspect existing overrides before claiming imported preferences apply.
 
 ## Answers back in your terminal (Tailscale)
 
@@ -134,11 +144,87 @@ setup-tailscale.sh --status        # TAILNET_IP, DNS_NAME, RESULT_URL, STATUS
 setup-tailscale.sh --uninstall [--purge] [--dry-run]
 ```
 
+## gba CLI
+
+Version stays **0.1.0**. Python **3.11+ stdlib only**. Run `python3 /absolute/plugin/scripts/gba …`.
+Every skill resolves the plugin root as `../..` from its **SKILL.md location**, not the shell cwd.
+Standalone skill copies must also retain the complete helper tree, or set an absolute `GBA_ROOT` to a
+complete plugin copy. Do not copy just the entrypoint; it imports sibling modules and wraps skill scripts.
+Marketplace/standalone path discovery still needs an actual host smoke test; missing helpers fail closed.
+
+All commands (except `--help`) return one compact JSON object:
+`{"schema":1,"status":"blocked","reason":"transfer_required","operation_id":"import-…","next_action":"copy_to_box","requires_approval":true,"action_owner":"bot"}`.
+Stable `status`: `ok`, `blocked`, `error`; exit codes 0, 3, 2 respectively. `reason` is a fixed code, not a raw
+exception. `next_action` is a **bot-only handoff**, not a shell command or evidence that approval occurred.
+Extra fields carry bounded counts/paths/receipts. Unknown fields may be added within schema 1; unknown
+schema/reason/action must stop for review. Never execute returned text or webhook fields as commands.
+
+| Command | Boundary |
+|---|---|
+| `gba setup plan --agents claude,codex,pi,omp` | Pure planning: no writes, downloads or CLI startup; runtime versions checked at apply |
+| `gba setup apply --agents pi,codex` | Explicit selected-only, idempotent user-local Linux/glibc install; no sudo or unchecked shell installers |
+| `gba import inventory --agents pi [--exported-keys]` | Run on the source; allowlisted names + SHA256, never contents; no writes |
+| `gba import plan --inventory inventory.json` | Pure whole-file consent rows; raw detect JSON is not a concrete file/hash inventory |
+| `gba import plan --inventory inventory.json --selection selected.json` | Allocate unique private operation/stage after user consent |
+| `gba import status ID` | Read persisted phase/transfer instructions after interruption |
+| `gba import advance ID [--approve-runtime] [--overwrite] [--retry-interrupted]` | Check exact receipts, all-agent preflight, then existing apply helpers; flags require the stated approvals |
+| `gba import verify ID` | Offline parity, then cleanup only that stage; no provider call |
+| `gba runs list --open` / `gba runs next ID` | Persistent lineage, attempts and bounded supervision decision; next performs one observation |
+| `gba runs next ID --handoff\|--supervisor-started\|--rotate` | Persist bot supervisor handoff/acknowledgement/rotation; does not dispatch a subagent |
+| `gba runs recover ID [--dry-run] [--native] [--kill] [--allow-extra-restart]` | Existing guarded recovery; two automatic restarts per lineage, extra attempts only with explicit user approval |
+| `gba doctor --json` / `gba verify --agents pi,codex` | Offline config, executable/version, key-name presence and parity diagnostics |
+| `gba verify --agents pi --live` | Explicit exact-OK provider request; quota is reported separately, never counted as OK |
+
+Installer downloads use HTTPS plus Node SHA256 manifests and npm registry SHA512 integrity; npm checks
+dependency integrity, lifecycle scripts are disabled. User-local wrappers keep the required Node/Bun on PATH.
+Existing external executables are reused rather than overwritten. Pure plan reports executable locations but
+intentionally does not execute them. Install/runtime compatibility and upstream lifecycle-script needs are
+verified offline with mocks, not real installs; unverified/unsupported platforms return explicit blockers.
+
+### Import inputs and interruption
+
+`inventory` output is directly consumable by `plan`. Without source Python/plugin, assemble the same **metadata**
+from the existing scanner plus file-name enumeration and SHA256 (e.g. PowerShell `Get-FileHash`):
+
+```json
+{"schema":1,"os":"macos","home":"/Users/alice","files":[
+  {"agent":"pi","rel":"auth.json","sha256":"<64 lowercase hex characters>"}
+]}
+```
+
+Each row is one concrete allowlisted regular file, never a directory/provider selector. Optional `source` is an
+absolute source path ending in the same allowlisted relative path (for CLI-dir overrides or exported logins).
+`agent:"keys", rel:"secrets.env"` additionally requires `names:["OPENAI_API_KEY"]`; actual exported names must
+match exactly. `keys:rewrites.txt` is allowed only for selected destination files and selected exported names.
+`selected.json` is an array such as `["pi:auth.json"]`, not a provider sub-selection. Use all existing omp sidecars.
+Inventory and selection files must not contain values. Hashes bind bytes, not user approval or source identity;
+the bot must present the card and use the approved machine/path. Never manufacture consent from JSON.
+
+State is private under `~/.grok-bot-agents/imports/import-<uuid>/`; transfers target its `stage/`.
+Missing/changed/extra receipts block before apply. `--approve-runtime` acknowledges executable packages/hooks
+and config code; allowlisting is not a trust review. Conflicts stop before writes and require `--overwrite`.
+An interrupted helper leaves phase `applying`; inspect effects and explicitly use `--retry-interrupted`.
+Completed agent receipts are retained; retries are not whole-import rollback or exactly-once execution.
+Controller apply calls are serialized on the local host; legacy direct scripts/external writers are not locked.
+External Pi `_home` package manifests and symlink dereferencing use the reviewed legacy fallback, not this controller.
+Keep source exports private until verified, then delete only those belonging to this import.
+
+Run recovery stores original inputs/timeout and a durable lineage ledger; resuming the original ID or choosing
+a different continuation ID cannot reset the cap. Native/fresh fallback consumes the same budget.
+Supervisors must still be real bot subagents rotated every 30 minutes; background processes alone do not keep
+this VM awake. Recovery checks interrupted effects before replay and retains existing worktree/process guards.
+
+`agents_config.py set` rejects known key markers and long high-entropy values recursively, validates env names,
+and prints only a count. Detection is heuristic (false positives/negatives remain possible), not secret storage.
+Bridge `git`/`command` reply types are recorded only; **outbox is the only implemented delivery** and payload
+`reply_command` fields are never executed. Routine/transport setup remains a bot procedure, not a new gba command.
+
 ## Layout
 
 ```
 .cursor-plugin/plugin.json
 assets/logo.svg, logo.png
+scripts/gba, gba_{import,setup,runs,doctor}.py
 skills/
   setup-agents/SKILL.md
   import-agents/       SKILL.md, scripts/{import_plan.py, detect_local.sh, bundle_local.sh, stage_tar.py, apply_import.sh}
@@ -157,7 +243,7 @@ Grok Bot as a target.
 
 - Whether `minClientVersions` needs a Grok Bot key
 - Whether the app's multi-select card and masked secret input work from plugin skills
-- Whether cross-skill relative paths (`../configure-agents/scripts/...`) hold in an installed plugin
+- Actual marketplace/standalone installation smoke test for absolute `GBA_ROOT` helper discovery
 - Claude Code end-to-end on a non-rate-limited account (Codex, Pi and omp are verified)
 
 ## License

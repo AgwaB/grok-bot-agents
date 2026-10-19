@@ -4,6 +4,29 @@
 
 First release.
 
+- Add the thin, plugin-relative Python 3.11+ stdlib `scripts/gba` CLI (still **0.1.0**),
+  with schema-1 JSON, fixed reason codes, exit statuses, and bot-only approval/action handoffs:
+  - Consent-bound imports: concrete allowlisted files, whole-file/provider consent, grouped omp
+    DB sidecars, unique private staging, SHA256 receipts, all-agent preflight, explicit overwrite/
+    runtime/interrupted-retry approvals, resumable apply and offline verification/cleanup.
+  - Selected-only user-local Linux installer: write-free planning, HTTPS + checksum/integrity
+    verification, Node/Bun bootstrap, disabled package lifecycle scripts, managed wrappers and
+    repeatable apply without clearing config preferences.
+  - Persistent run lineage, original inputs/timeout and supervisor handoffs; enforce two automatic
+    restarts across original/custom IDs and native fallbacks with an atomic local ledger.
+    Further attempts require `--allow-extra-restart`; existing ownership/native/kill guards remain.
+  - Offline doctor/verify combines sanitized versions, config, key-name presence and parity;
+    only explicit `verify --live` requests exact OK, with quota reported separately.
+- Correct verified skill drift: router JSON and bulk thresholds, Pi `max`, whole-file consent,
+  scanners' internal reads, all CLI-directory overrides, Windows limits, settings-only defaults,
+  and outbox-only webhook replies. Reject secret-looking config values in arbitrary/nested fields,
+  validate env names, and stop echoing values. Keep bot approvals, credentials, transfers and
+  routine creation outside the CLI. Five SKILL.md files shrink from **990 to 325 lines**.
+- Add isolated-HOME controller/CLI/drift regressions and secret canaries; retain existing import/
+  runner suites. See `TESTING.md` for exact commands, results and unverified platform/live paths.
+  Bridge exit/type guards and file errors now have explicit boundaries; deferred test expressions
+  are documented for ShellCheck and the Tailscale status conditional is made unambiguous.
+
 - Fix delegate recovery review findings: discover omp session headers after title records
   (bounded 32-record scan; synthetic format fixture), retain requested Claude/Codex IDs
   through early native failures, and lock canonical workdirs across checkpoint/launch

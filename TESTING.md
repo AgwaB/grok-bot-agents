@@ -1,5 +1,80 @@
 # Testing
 
+## gba CLI proposals 1–4 and verified drift (0.1.0, 2026-10-19)
+
+All new evidence is **offline**. No real credentials, provider calls, package downloads, global
+installs, releases or external writes. Python fixtures use temporary HOME/config/run roots and
+fake CLIs/stores; installers use mocked HTTPS artifacts and fake runtimes. Existing historical
+live results farther below were **not repeated** and do not certify this new CLI.
+
+Run from the repository root (Python 3.11+, Bash, Git, Node and ShellCheck already installed):
+
+```bash
+h=$(mktemp -d); trap 'rm -rf "$h"' EXIT
+SC_DIR=$(dirname "$(command -v shellcheck)")
+env -i HOME="$h" PATH=/usr/bin:/bin LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 \
+  python3 -m unittest discover -s tests -p '*_test.py' -v
+env -i HOME="$h" PATH="$SC_DIR:/usr/bin:/bin" PYTHONDONTWRITEBYTECODE=1 \
+  bash tests/run_import_tests.sh
+env -i HOME="$h" PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 \
+  bash tests/delegate_pi_retry_test.sh
+shellcheck -x skills/*/scripts/*.sh tests/*.sh
+for f in skills/*/scripts/*.sh tests/*.sh; do bash -n "$f"; done
+python3 -X "pycache_prefix=$h/cache" -m py_compile scripts/gba scripts/*.py skills/*/scripts/*.py tests/*.py
+git diff --check
+```
+
+Latest results:
+
+- **197 Python tests run: 196 passed, 1 skipped** (PowerShell unavailable). This includes the
+  existing 62 delegate + 60 import methods, not 197 newly added tests.
+- `tests/run_import_tests.sh`: **60 tests / 59 passed / 1 skipped**, plus **26 auth Bash checks**;
+  embedded-scanner parity, syntax, import ShellCheck and Python compilation passed.
+- `tests/delegate_pi_retry_test.sh`: **26 checks passed**.
+- Full `shellcheck -x skills/*/scripts/*.sh tests/*.sh` and Bash syntax: **passed**. A first all-files
+  scan found pre-existing SC2015/SC2016/SC2329 informational patterns; the health conditional is
+  now explicit and intentionally deferred/eval-only test expressions have narrowly explained annotations.
+- The first import-runner invocation could not find ShellCheck on its restricted PATH (exit 2);
+  rerunning with its explicit binary directory passed. No tools were installed to get a pass.
+- Full compilation and `git diff --check`: passed; plugin version remains **0.1.0**.
+- Active LSP error probes covered 15 Python files. One workspace-resolution false positive remains
+  recorded for the executable script's sibling `gba_setup` import; CLI subprocess integration proves
+  it resolves. No production ignore was added. Other probed files had no error diagnostics.
+
+New methods: config safety **5**, import controller **15**, setup **19**, run lifecycle **15**,
+shared doctor **12**, CLI integration **5**, skill/webhook contracts **4**. Tests cover:
+
+- Write-free planning including bytecode, standalone incomplete-plugin refusal, arbitrary cwd,
+  stable JSON/exit codes, argument/parser errors and both-output-stream secret canaries.
+- Mixed-provider whole-file refusal, omp sidecar grouping, source/export inventory and hashes,
+  forbidden paths, private unique staging, missing/extra/changed/symlink transfers, corrupt state,
+  runtime/overwrite preflight, interrupted retry, real keys/settings apply helpers and cleanup.
+- Selected-only and repeated installs, preserving preferences/unselected agents, runtime/wrapper
+  requirements, checksum/SRI failures, unsafe targets/archives and unsupported platforms.
+- Original/custom-ID cap enforcement, simultaneous ledger reservations, native rejection fallback,
+  explicit extra attempts, preserved inputs/timeout/permissions, write-free recovery dry-run,
+  ownership guards and persistent supervisor handoff/rotation.
+- Offline version/key-name/parity diagnostics; explicit fake live OK versus quota/mismatched output;
+  config secrets rejected recursively, router JSON/bulk semantics, Pi `max`, and webhook command
+  payloads staying data-only.
+
+### Remaining gaps / manual acceptance
+
+- No native macOS/Windows store/ACL/junction checks or PowerShell execution. Installation supports
+  Linux x64/arm64 glibc ≥2.28; real package downloads, lifecycle-script needs and version compatibility
+  still need a separately approved disposable installation test.
+- Marketplace/host tool path discovery, CopyToBox/consent UI, masked keys, login, Tailscale and actual
+  supervisor dispatch/VM pause recovery were not exercised. The CLI only returns bot handoffs.
+- Import operations serialize controller apply calls locally, but no distributed/legacy-writer lock,
+  atomic whole-import rollback or exactly-once retry is claimed. Stop source omp before copying.
+  Symlinked/external Pi packages need the reviewed legacy full-consent fallback, not this controller.
+- Config secret detection is heuristic. Unrecognized values may evade it; high-entropy ordinary text
+  may be rejected. No script can prove human consent from a flag or selection file.
+- Download hashes bind HTTPS metadata/artifacts; this is not independent release-signature verification.
+  Recovery reservations are conservative and consumed even if startup fails. Hostile same-user
+  filesystem races/network filesystems remain outside the tested ownership boundary.
+- Only outbox bridge delivery is implemented; git/command reply types remain recorded data.
+
 ## Offline delegate runner regressions (0.1.0)
 
 Run from the repository root on Linux with Bash, Python 3, Git and GNU utilities:
@@ -19,7 +94,7 @@ is needed. The Python suite creates a clean environment, temporary HOME/run root
 fake versions of **all four CLIs** and npm, and disposable Git repositories. The
 existing Bash suite is launched with an empty environment to exclude config overrides.
 
-Latest review-fix evidence: **62 delegate Python tests passed**, **26 Pi-retry Bash checks
+Historical pre-gba review-fix evidence: **62 delegate Python tests passed**, **26 Pi-retry Bash checks
 passed**; ShellCheck reported **zero diagnostics** on all four
 changed shell scripts. Shell syntax, temporary-cache Python compilation and `git diff --check`
 passed. `bash tests/run_import_tests.sh` also passed again: **60 Python tests run, 59 passed,
