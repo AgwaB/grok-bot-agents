@@ -129,12 +129,16 @@ if review_modified:
 # Historical reconnect stderr and partial prose about quota must not override a final auth/other error.
 errtxt = failure or stream_error or stderr[-4000:]
 LIMIT_RE = r"hit your (weekly|daily|usage|session) limit|usage limit|rate.?limit|quota|\b429\b|too many requests|insufficient_quota|credit balance is too low"
+AUTH_RE = r"\b(401|403)\b|unauthenticated|unauthori[sz]ed|forbidden|invalid[ _-](api[ _-])?key|authentication|authorization|permission denied"
 CONN_RE = (r"websocket|idle timeout|\bECONN(RESET|REFUSED|ABORTED)\b|\bETIMEDOUT\b|\bEPIPE\b|\bEAI_AGAIN\b|\bENOTFOUND\b|\bENETUNREACH\b"
            r"|\bEHOSTUNREACH\b|socket hang ?up|fetch failed|network (error|connection|is unreachable)|connection (?:was )?(error|reset|closed|lost|refused|aborted|dropped)"
            r"|closed unexpectedly|\btimed out\b|error (decoding response body|sending request)"
            r"|stream (disconnected|closed|ended|error)|premature close|other side closed|^terminated$|\bUND_ERR|transport failure|provider_transport_failure")
 error_kind, resumable = "incomplete_output" if incomplete else None, False
-if status == "error" and not review_modified:
+# Cancellation and explicit auth rejection are not retriable connection drops, even when
+# their diagnostics mention the transport (e.g. WebSocket 401) or contain old retry noise.
+cancelled = rc in (130, 143) or last_stop == "aborted"
+if status == "error" and not review_modified and not cancelled and not re.search(AUTH_RE, errtxt, re.I):
     if re.search(LIMIT_RE, errtxt, re.I):
         status, error_kind = "rate_limited", None
         try:

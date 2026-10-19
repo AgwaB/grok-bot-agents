@@ -190,6 +190,18 @@ class RunnerTests(unittest.TestCase):
         m = self.run_agent("pi", [message("", "error", "Request timed out")], rc=124)
         self.assertEqual((m["status"], m["resumable"]), ("timeout", False))
 
+    def test_auth_and_cancellation_do_not_resume_old_transport_errors(self):
+        for error in ("WebSocket error: 401 Unauthorized", "403 Forbidden: error sending request",
+                      "Invalid API key: Request timed out"):
+            with self.subTest(error=error):
+                m = self.run_agent("omp", [message("", "error", error)])
+                self.assertEqual((m["status"], m["resumable"]), ("error", False))
+        for rc in (130, 143):
+            m = self.run_agent("codex", [], rc=rc, stderr="WebSocket error before cancellation")
+            self.assertFalse(m["resumable"])
+        m = self.run_agent("pi", [message("", "aborted", "Request timed out")])
+        self.assertFalse(m["resumable"])
+
     def test_nonzero_exit_is_never_hidden_by_success_event(self):
         m = self.run_agent("pi", [message()], rc=7)
         self.assertEqual((m["status"], m["exit_code"]), ("error", 7))
