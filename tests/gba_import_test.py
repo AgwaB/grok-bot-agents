@@ -5,8 +5,11 @@ import hashlib
 import importlib.util
 import json
 import os
+import signal
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -442,6 +445,125 @@ class ImportController(unittest.TestCase):
         path.write_text(json.dumps(state))
         self.assertEqual(self.invoke('verify', op['operation_id'])['reason'], 'artifact_verification_failed')
         self.assertTrue(Path(op['stage']).exists())
+
+    def process_helper(self):
+        _, atomic, guard = IMPORT.helpers(ROOT)
+        owned = importlib.import_module('gba_import_process')
+        return owned, atomic, guard
+
+    def writer_script(self):
+        # A grandchild that ignores TERM demonstrates group-wide KILL and drain.
+        child = ('import os, signal, time; from pathlib import Path; '
+                 'signal.signal(signal.SIGTERM, signal.SIG_IGN); '
+                 'p=Path(os.environ["HOME"])/"heartbeat"; '
+                 'p.write_text("ready"); '\
+                 '\nwhile True: p.write_text(str(time.monotonic())); time.sleep(0.01)')
+        return ('import subprocess, sys, time; '
+                'subprocess.Popen([sys.executable,"-c",' + repr(child) + ']); time.sleep(60)')
+
+    def wait_file(self, path, process=None):
+        deadline = time.monotonic() + 8
+        while not path.exists() and time.monotonic() < deadline:
+            if process and process.poll() is not None:
+                self.fail('fixture controller stopped before publishing ownership')
+            time.sleep(0.02)
+        self.assertTrue(path.exists(), 'fixture writer did not start')
+
+    def test_import_timeout_kills_and_drains_helper_process_group(self):
+        owned, atomic, guard = self.process_helper()
+        op = Path(self.plan()['stage']).parent
+        with self.assertRaises(subprocess.TimeoutExpired):
+            owned.run([sys.executable, '-c', self.writer_script()], dict(os.environ), op, atomic, guard, timeout=1)
+        heartbeat = self.home / 'heartbeat'
+        self.assertTrue(heartbeat.exists())
+        before = heartbeat.read_bytes()
+        time.sleep(0.08)
+        self.assertEqual(heartbeat.read_bytes(), before)
+        self.assertFalse((op / 'helper.json').exists())
+
+    def launch_writer_controller(self, op):
+        script = ('import sys; from pathlib import Path; '
+                  f'sys.path[:0]=[{str(ROOT / "scripts")!r},{str(ROOT / "skills/import-agents/scripts")!r}]; '
+                  'import os, gba_import, gba_import_process; from import_safety import atomic_write, guard_path; '
+                  f'op=Path({str(op)!r}); '\
+                  '\nwith gba_import.lock(op.parent, guard_path):'\
+                  f'\n gba_import_process.run([sys.executable,"-c",{self.writer_script()!r}],dict(os.environ),op,atomic_write,guard_path)')
+        return subprocess.Popen([sys.executable, '-B', '-c', script], env=dict(os.environ),
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def test_parent_sigkill_blocks_retry_and_preserves_working_files(self):
+        owned, _, guard = self.process_helper()
+        op_data = self.plan()
+        self.stage(op_data)
+        op = Path(op_data['stage']).parent
+        state = json.loads((op / 'state.json').read_text())
+        state['phase'] = 'applying'
+        (op / 'state.json').write_text(json.dumps(state))
+        working = op / 'working'
+        working.mkdir()
+        (working / 'sentinel').write_text('owned scratch')
+        parent = self.launch_writer_controller(op)
+        pgid = None
+        try:
+            self.wait_file(self.home / 'heartbeat', parent)
+            pgid = json.loads((op / 'helper.json').read_text())['pgid']
+            parent.kill()
+            parent.wait(timeout=5)
+            self.assertTrue(owned.group_live(pgid))
+            for target in (op_data, self.plan()):
+                result = self.invoke('advance', target['operation_id'], '--approve-runtime', '--retry-interrupted')
+                self.assertEqual(result['reason'], 'previous_writer_active')
+            self.assertTrue((working / 'sentinel').is_file())
+            self.assertEqual(owned.pending_writer(op.parent, guard), 'previous_writer_active')
+        finally:
+            if parent.poll() is None:
+                parent.kill()
+            parent.wait(timeout=5)
+            if pgid is None and (op / 'helper.json').exists():
+                pgid = json.loads((op / 'helper.json').read_text()).get('pgid')
+            if pgid and owned.group_live(pgid):
+                os.killpg(pgid, signal.SIGKILL)  # Only this test's freshly created group.
+                deadline = time.monotonic() + 5
+                while owned.group_live(pgid) and time.monotonic() < deadline:
+                    time.sleep(0.02)
+        self.assertIsNone(owned.pending_writer(op.parent, guard))
+        self.assertEqual(self.invoke('advance', op_data['operation_id'], '--approve-runtime', '--retry-interrupted')['phase'], 'applied')
+
+    def test_parent_sigterm_drains_children_before_unlock(self):
+        owned, _, guard = self.process_helper()
+        op = Path(self.plan()['stage']).parent
+        parent = self.launch_writer_controller(op)
+        try:
+            self.wait_file(self.home / 'heartbeat', parent)
+            pgid = json.loads((op / 'helper.json').read_text())['pgid']
+            parent.terminate()
+            parent.wait(timeout=8)
+            self.assertFalse(owned.group_live(pgid))
+            self.assertIsNone(owned.pending_writer(op.parent, guard))
+            with IMPORT.lock(op.parent, guard):
+                self.assertFalse((op / 'helper.json').exists())
+        finally:
+            if parent.poll() is None:
+                parent.terminate()
+                parent.wait(timeout=8)
+
+    def test_helper_gate_prevents_writes_before_ownership_publication(self):
+        owned, atomic, guard = self.process_helper()
+        op = Path(self.plan()['stage']).parent
+        marker = self.home / 'gate-opened'
+        real_save = owned.save_owner
+        def fail_publication(path, record, writer):
+            if record['phase'] == 'running':
+                self.assertFalse(marker.exists())
+                raise OSError('simulated publication failure')
+            real_save(path, record, writer)
+        with patch.object(owned, 'save_owner', side_effect=fail_publication), self.assertRaises(OSError):
+            owned.run([sys.executable, '-c', f'from pathlib import Path; Path({str(marker)!r}).touch()'],
+                      dict(os.environ), op, atomic, guard)
+        self.assertFalse(marker.exists())
+        self.assertIsNone(owned.pending_writer(op.parent, guard))
+        (op / 'helper.json').write_text('{"schema":1,"phase":"launching"}')
+        self.assertEqual(owned.pending_writer(op.parent, guard), 'helper_ownership_unknown')
 
     def test_export_names_bound_to_consent(self):
         self.content = b"export ALLOWED_KEY='sk-secret-canary'\nexport NOT_SELECTED='sk-unticked-canary'\n"

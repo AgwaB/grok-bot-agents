@@ -49,6 +49,7 @@ def configure(subparsers):
 
 
 def helpers(root):
+    sys.path.insert(0, str(root / 'scripts'))
     sys.path.insert(0, str(root / 'skills/import-agents/scripts'))
     plan = importlib.import_module('import_plan')
     safety = importlib.import_module('import_safety')
@@ -252,7 +253,8 @@ def call_apply(root, state, operation, agent, dry=False, overwrite=False, stage=
         command += ['--dry-run']
     if overwrite:
         command += ['--overwrite']
-    process = subprocess.run(command, env=env, capture_output=True, text=True, timeout=1800)
+    _, atomic, guard = helpers(root)
+    process = importlib.import_module('gba_import_process').run(command, env, operation, atomic, guard)
     # Treat all helper output as untrusted; only these fixed fields cross the boundary.
     try:
         data = json.loads(process.stdout)
@@ -492,6 +494,10 @@ def handle(args, root):
     with lock(state_root(), guard):
         # Re-read under the lock to avoid stale success/replay after concurrent calls.
         operation, state = load_operation(args.id, guard, plan)
+        problem = importlib.import_module('gba_import_process').pending_writer(state_root(), guard)
+        if problem:
+            return result('blocked', problem, 'wait' if problem == 'previous_writer_active' else 'review_import',
+                          operation_id=args.id)
         if args.import_command == 'verify':
             if state['phase'] not in ('applied', 'verified'):
                 return public(state, operation)
@@ -561,7 +567,9 @@ def handle(args, root):
             try:
                 rc, data = call_apply(root, state, operation, agent, overwrite=args.overwrite, stage=scratch / 'stage')
             finally:
-                remove_stage(scratch)
+                # An unresolved/live helper owns its working files even after controller death.
+                if not (operation / 'helper.json').exists():
+                    remove_stage(scratch)
             report = sanitized_report(data, [r for r in state['receipts'] if r['id'].startswith(agent + ':')])
             previous = state['reports'][agent]
             state['reports'][agent] = {key: sorted(set(previous[key] + report[key])) for key in previous}
