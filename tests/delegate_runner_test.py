@@ -316,8 +316,9 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(resumed["run_dir"], str(self.runs / (r.name + "-r2")))
         self.assertEqual(resumed["permission"], "safe")
 
-    def idle_run(self):
-        r = self.runs / "idle"
+    def idle_run(self, agent=None):
+        self.count += 1
+        r = self.runs / f"idle-{self.count}"
         work = r / "work"
         work.mkdir(parents=True)
         p = subprocess.Popen(["timeout", "30", "sleep", "30"], cwd=work, env=self.env,
@@ -329,6 +330,8 @@ class RunnerTests(unittest.TestCase):
             p.wait(timeout=5)
         self.addCleanup(cleanup)
         (r / "agent.pid").write_text(str(p.pid))
+        if agent:
+            (r / "cmd.txt").write_text(f"{agent} -p '<prompt.md>'\n")
         now = int(time.time())
         for name in ("stdout.log", "stderr.log", "prompt.md"):
             (r / name).write_text("test\n")
@@ -354,29 +357,46 @@ class RunnerTests(unittest.TestCase):
         proc = self.supervise(r)
         self.assertIn("reason=died_no_meta", proc.stdout)
 
-    def test_silent_thinking_is_advisory_by_default(self):
-        r, p = self.idle_run()
-        proc = self.supervise(r)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("status=running next=continue", proc.stdout)
-        self.assertIn("reason=idle_suspected", proc.stdout)
-        self.assertIn("resumable=0", proc.stdout)
-        self.assertIsNone(p.poll())
+    def test_silent_claude_codex_and_unknown_are_advisory_by_default(self):
+        for agent in ("claude", "codex", None):
+            with self.subTest(agent=agent):
+                r, p = self.idle_run(agent)
+                proc = self.supervise(r)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn("status=running next=continue", proc.stdout)
+                self.assertIn("reason=idle_suspected", proc.stdout)
+                self.assertIn("resumable=0", proc.stdout)
+                self.assertIsNone(p.poll())
 
-    def test_stall_restart_requires_explicit_opt_in(self):
-        r, _ = self.idle_run()
-        proc = self.supervise(r, "--stall-action", "restart")
-        self.assertEqual(proc.returncode, 2, proc.stderr)
-        self.assertIn("status=stalled", proc.stdout)
-        self.assertIn("resumable=1", proc.stdout)
+    def test_pi_omp_stall_defaults_to_restart(self):
+        for agent in ("pi", "omp"):
+            with self.subTest(agent=agent):
+                r, p = self.idle_run(agent)
+                proc = self.supervise(r)
+                self.assertEqual(proc.returncode, 2, proc.stderr)
+                self.assertIn("status=stalled next=return", proc.stdout)
+                self.assertIn("resumable=1", proc.stdout)
+                self.assertIsNone(p.poll())  # the bot, not the supervisor, performs recovery
+
+    def test_explicit_stall_action_overrides_each_cli_default(self):
+        for agent in ("pi", "omp", "claude", "codex"):
+            with self.subTest(agent=agent):
+                r, _ = self.idle_run(agent)
+                action = "report" if agent in ("pi", "omp") else "restart"
+                proc = self.supervise(r, "--stall-action", action)
+                self.assertEqual(proc.returncode, 0 if action == "report" else 2, proc.stderr)
+                self.assertIn("resumable=0" if action == "report" else "resumable=1", proc.stdout)
+                self.assertIn("reason=idle_suspected" if action == "report" else "status=stalled", proc.stdout)
 
     def test_recent_session_activity_prevents_stall(self):
-        r, _ = self.idle_run()
-        (r / "sessions").mkdir()
-        (r / "sessions" / "owned.jsonl").write_text("{}\n")
-        proc = self.supervise(r, "--stall-action", "restart")
-        self.assertIn("status=running", proc.stdout)
-        self.assertNotIn("idle_suspected", proc.stdout)
+        for agent in ("pi", "omp"):
+            with self.subTest(agent=agent):
+                r, _ = self.idle_run(agent)
+                (r / "sessions").mkdir()
+                (r / "sessions" / "owned.jsonl").write_text("{}\n")
+                proc = self.supervise(r)
+                self.assertIn("status=running", proc.stdout)
+                self.assertNotIn("idle_suspected", proc.stdout)
 
     def test_observation_gap_gives_full_wake_grace_without_dmesg(self):
         r, _ = self.idle_run()

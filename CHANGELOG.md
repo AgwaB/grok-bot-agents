@@ -12,8 +12,10 @@ First release.
   - Parse Claude streamed results, Codex terminal failures, and Pi/omp final stop reasons;
     preserve actual exit codes, reject missing/truncated completion, classify transport errors
     without mistaking partial output or old retry diagnostics for the final error.
-  - Stream Claude partial progress; silence/low CPU is advisory by default, with explicit
-    `--stall-action restart` opt-in and wake/observation-gap grace. Publish metadata atomically.
+  - Stream Claude partial progress; default stall action is `restart` for Pi/omp (no output,
+    owned session writes or CPU progress), `report` for Claude/Codex and unknown runs.
+    Explicit `--stall-action` overrides either default; retain wake/observation-gap grace
+    and atomic metadata publication.
   - Preserve restart permissions/run roots; make dry-run write-free; reject reused/unsafe run IDs,
     keep run data private, and check timeout cwd before trusting a PID. Rate-limit cleanup now
     retains agent commits and ignored artifacts instead of treating a clean index as no work.

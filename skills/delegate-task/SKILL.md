@@ -180,8 +180,8 @@ limits). A subagent that waits in Shell keeps the box awake, so long runs get a 
 | `running` (`reason=budget_used`) | dispatch the next supervisor right away, same brief |
 | `done` / `failed` | the run ended: read `meta.json` and report (section 5). `reason=died_no_meta` means it died without a summary, usually a box pause or restart: restart it |
 | `failed` (`reason=conn_error`) | the run ended on a dropped connection or model stream (WebSocket error, idle timeout, ECONNRESET, socket hang up, fetch failed, ...), usually after a box pause: restart it right away, no need to ask |
-| `running` (`reason=idle_suspected`, `next=continue`) | silence/low CPU is advisory: keep supervising; do **not** restart solely on this signal. The absolute timeout still applies |
-| `stalled` | only emitted with explicit `--stall-action restart`; restart under that opt-in heuristic, which can still misjudge silent thinking |
+| `running` (`reason=idle_suspected`, `next=continue`) | report-only (default for Claude/Codex, or explicit `--stall-action report`): tell the user about suspected idle and keep supervising; do **not** run `resume-run.sh` solely on this signal. The absolute timeout still applies |
+| `stalled` (`resumable=1`) | default for Pi/omp, or explicit `--stall-action restart`: automatically run `resume-run.sh --kill` below, within the two-restart cap. No output, no owned session-file writes and low CPU for `--stall-min` triggered this heuristic; it can still misjudge silent thinking |
 
 Every line with `resumable=1` (`stalled`, `died_no_meta`, `conn_error`) gets the restart below. A run you
 started without a supervisor that returns `error_kind: conn_error` gets the same treatment.
@@ -202,7 +202,8 @@ cap: after 2 restarts of the same task, stop and tell the user.
 
 `supervise.sh` line: `status=running|done|failed|stalled next=continue|return run_dir=DIR reason=... idle=Ns
 cpu_delta=Ns forks=N remaining=Ns resumable=0|1`. Details go to `<run-dir>/supervise.log`. Options: `--slice S` (one call,
-default 600), `--interval S` (30), `--stall-min M` (10), `--stall-action report|restart` (report).
+default 600), `--interval S` (30), `--stall-min M` (10), `--stall-action report|restart`
+(default `restart` for Pi/omp; `report` for Claude/Codex and unidentified legacy runs). An explicit flag wins.
 The heuristic watches run logs and owned Pi/omp session files, not all global session directories.
 Observation gaps and detected VM wakes reset its grace window; they do not extend the absolute timeout.
 
@@ -233,9 +234,11 @@ Observation gaps and detected VM wakes reset its grace window; they do not exten
   for this hardening. Current upstream omp fixes zero-exit errors; older versions still need event parsing.
 - A box restart kills every run. `supervise.sh` then reports `failed reason=died_no_meta`; restart with
   `resume-run.sh`. Only committed or saved work survives in the worktree.
-- **Silence is not a hang.** Even streamed Claude output can pause; Codex often reports only step boundaries.
-  Default supervision never authorizes restart from silence alone. Use the wall-clock timeout, or explicitly
-  opt into heuristic restarts for a workload you know. Heartbeats cannot prevent forced VM suspension.
+- **Silence is not proof of a hang.** Claude/Codex default to report-only: tell the user and keep watching,
+  not automatic resume. Pi/omp expose owned session-file writes, so their default authorizes automatic
+  `resume-run.sh --kill` only after no output, no owned session writes and low CPU for `--stall-min`.
+  This remains a heuristic; use `--stall-action report` for quiet workloads or `restart` to opt other CLIs in.
+  Wake grace and the wall-clock timeout still apply. Heartbeats cannot prevent forced VM suspension.
 - **Recovery is not exactly-once.** Checkpoint/re-prompt can repeat external effects. The two-restart cap
   is bot policy, not a cross-process lock. There is no global concurrency/quota scheduler or log rotation;
   serialize resumes of the same task. Re-supply external `--input` dirs and nondefault timeout via overrides.

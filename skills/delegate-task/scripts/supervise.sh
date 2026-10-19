@@ -8,7 +8,7 @@
 #   --slice S    longest single invocation (default 600; stays under the 780 s Shell call limit)
 #   --interval S seconds between checks (default 30)
 #   --stall-min M  no log/session writes and little CPU for M minutes = suspected idle (default 10)
-#   --stall-action report|restart  report idle_suspected (default); opt in to resumable stalled
+#   --stall-action report|restart  default: restart for pi/omp, report for claude/codex/unknown
 # Output (stdout, one line):
 #   status=running|done|failed|stalled next=continue|return run_dir=DIR reason=... idle=Ns cpu_delta=Ns forks=N remaining=Ns resumable=0|1
 #   next=continue: call again.  next=return: stop and hand the line back (budget used, or run ended / stalled).
@@ -17,7 +17,7 @@
 # Exit: 0 running|done, 1 failed, 2 stalled, 64 usage error. Details go to <run-dir>/supervise.log.
 set -uo pipefail
 
-ARG="" MAX=1800 NEW=0 SLICE=600 INTERVAL=30 STALL_MIN=10 STALL_ACTION=report
+ARG="" MAX=1800 NEW=0 SLICE=600 INTERVAL=30 STALL_MIN=10 STALL_ACTION=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --new) NEW=1; shift;;
@@ -34,7 +34,7 @@ done
 for v in "$MAX" "$SLICE" "$INTERVAL" "$STALL_MIN"; do
   case "$v" in ''|*[!0-9]*) echo "status=failed next=return run_dir= reason=usage:not_a_number_$v"; exit 64;; esac
 done
-case "$STALL_ACTION" in report|restart) ;; *) echo "status=failed next=return run_dir= reason=usage:stall_action"; exit 64;; esac
+case "$STALL_ACTION" in ''|report|restart) ;; *) echo "status=failed next=return run_dir= reason=usage:stall_action"; exit 64;; esac
 [ "$INTERVAL" -gt 0 ] && [ "$STALL_MIN" -gt 0 ] || { echo "status=failed next=return run_dir= reason=usage:positive_interval_and_stall_required"; exit 64; }
 [ "$SLICE" -le 720 ] || SLICE=720   # one invocation must fit in a single Shell call
 
@@ -69,6 +69,25 @@ emit() {  # status next reason [exit]
 
 [ -d "$R" ] || emit failed return no_run_dir
 R="$(cd "$R" && pwd -P)"
+if [ -z "$STALL_ACTION" ]; then
+  AGENT=$(python3 - "$R" <<'PY'
+import json, os, shlex, sys
+from pathlib import Path
+r = Path(sys.argv[1])
+try:
+    agent = json.loads((r / "meta.json").read_text()).get("agent")
+except (OSError, ValueError):
+    agent = None
+if not agent:
+    try:
+        agent = os.path.basename(shlex.split((r / "cmd.txt").read_text())[0])
+    except (OSError, ValueError, IndexError):
+        agent = None
+print(agent or "unknown")
+PY
+)
+  case "$AGENT" in pi|omp) STALL_ACTION=restart;; *) STALL_ACTION=report;; esac
+fi
 
 fork_count() { dmesg 2>/dev/null | grep -c 'virtual machine fork' || true; }
 
@@ -130,7 +149,7 @@ if [ "$NEW" = 1 ] || [ ! -f "$DLF" ]; then echo $((T0 + MAX)) > "$DLF"; fi
 DEADLINE=$(cat "$DLF" 2>/dev/null || echo $((T0 + MAX)))
 SLICE_END=$((T0 + SLICE))
 FORKS=$(fork_count)
-echo "$(ts) slice start max=${MAX}s deadline=$(date -d "@$DEADLINE" '+%T') stall=${STALL}s forks=$FORKS" >> "$LOG"
+echo "$(ts) slice start max=${MAX}s deadline=$(date -d "@$DEADLINE" '+%T') stall=${STALL}s stall_action=$STALL_ACTION forks=$FORKS" >> "$LOG"
 
 while :; do
   T=$(now); REM=$((DEADLINE - T)); [ "$REM" -lt 0 ] && REM=0
@@ -177,8 +196,9 @@ while :; do
   if [ -n "$OLD" ] && [ "$CPU" -ge "$OLD" ]; then CPUD=$(( (CPU - OLD) / 100 )); else CPUD=-1; fi
   echo "$(ts) pid=${P:-none} idle=${IDLE}s cpu=$((CPU / 100))s cpu_delta=${CPUD}s busy_kids=$BUSY forks=$FORKS remaining=${REM}s" >> "$LOG"
   REASON=slice_end
-  # Cloud-side reasoning can be silent and use no local CPU. It is not proof of a dead agent.
-  # A shrinking tree CPU counter (children exited) also cannot establish inactivity.
+  # Pi/omp expose progress via owned session writes as well as output. Their default authorizes
+  # restart on this heuristic; Claude/Codex stay advisory. Quiet reasoning can still be misjudged.
+  # A shrinking tree CPU counter (children exited) cannot establish inactivity.
   if [ -n "$P" ] && [ "$IDLE" -ge "$STALL" ] && [ "$CPUD" -ge 0 ] && [ "$CPUD" -lt 2 ]; then
     [ "$STALL_ACTION" = restart ] && emit stalled return "no_output_no_cpu_${STALL_MIN}m"
     REASON=idle_suspected
