@@ -5,13 +5,13 @@ import hashlib
 import importlib
 import json
 import os
-from pathlib import Path, PurePosixPath
 import re
 import shutil
 import stat
 import subprocess
 import sys
 import uuid
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 AGENTS = ('claude', 'codex', 'pi', 'omp')
@@ -169,7 +169,7 @@ def public(state, operation, reason=None):
     phase = state['phase']
     data: dict[str, Any] = {'operation_id': state['operation_id'], 'phase': phase,
                            'selected_count': len(state['files']), 'applied_agents': state.get('applied', []),
-                           'stage': str(operation / 'stage')}
+                           'stage': str(operation / 'stage'), 'reports': state.get('reports', {})}
     if phase == 'awaiting_transfer':
         data['transfers'] = [{'artifact_id': f['id'], 'source': f['source'],
                              'destination': str(operation / 'stage' / ('_secrets' if f['agent'] == 'keys' else f['agent']) / f['rel'])}
@@ -242,9 +242,10 @@ def lock(root, guard):
         yield
 
 
-def call_apply(root, state, operation, agent, dry=False, overwrite=False):
-    env = dict(os.environ, AGENT_IMPORT_STAGE=str(operation / 'stage'))
-    command = ['bash', str(root / 'skills/import-agents/scripts/apply_import.sh'), agent]
+def call_apply(root, state, operation, agent, dry=False, overwrite=False, stage=None):
+    env = dict(os.environ, AGENT_IMPORT_STAGE=str(stage or operation / 'stage'))
+    command = ['bash', str(root / 'skills/import-agents/scripts/apply_import.sh'), agent,
+               '--selected-files', json.dumps([f['rel'] for f in state['files'] if f['agent'] == agent])]
     if agent != 'keys':
         command += ['--src-home', state['source_home'], '--keep-stage', '--no-verify']
     if dry:
@@ -258,6 +259,131 @@ def call_apply(root, state, operation, agent, dry=False, overwrite=False):
     except ValueError:
         data = {}
     return process.returncode, data
+
+
+def destination(agent, rel, plan):
+    home = Path.home()
+    override = {'codex': 'CODEX_HOME', 'claude': 'CLAUDE_CONFIG_DIR', 'pi': 'PI_CODING_AGENT_DIR'}.get(agent)
+    base = Path(os.environ.get(override, '') or home / plan[agent]['home']) if override else home / plan[agent]['home']
+    if (agent, rel) == ('claude', '_home/.claude.json'):
+        return Path(importlib.import_module('import_safety').claude_global(str(home)))
+    return base / rel
+
+
+def artifact_receipts(state, operation, agent, data, plan, guard):
+    """Private expected state, derived at preflight, never from a successful exit alone."""
+    files = [f for f in state['files'] if f['agent'] == agent]
+    if agent == 'keys':
+        receipts = []
+        for f in files:
+            if f['rel'] == 'rewrites.txt':
+                receipts.append({'id': f['id'], 'kind': 'directives', 'sha256': f['sha256']})
+                continue
+            path = operation / 'stage/_secrets/secrets.env'
+            guard(path)
+            assignments = {}
+            pattern = importlib.import_module('post_import').STAGED_LINE
+            for line in path.read_text(encoding='utf-8').splitlines():
+                match = pattern.fullmatch(line)
+                if match:
+                    assignments[match.group(1)] = hashlib.sha256(line.encode()).hexdigest()
+            if sorted(assignments) != f['names']:
+                raise ValueError('invalid key receipt')
+            receipts.append({'id': f['id'], 'kind': 'assignments', 'destination': str(Path.home() / '.agent-keys'),
+                             'assignments': assignments})
+        return receipts
+    rows = data.get('receipts', [])
+    if not isinstance(rows, list) or len(rows) != len(files):
+        raise ValueError('missing artifact receipts')
+    by_rel = {r['rel']: r for r in rows}
+    if set(by_rel) != {f['rel'] for f in files}:
+        raise ValueError('incomplete artifact receipts')
+    receipts = []
+    for f in files:
+        r = by_rel[f['rel']]
+        target = destination(agent, f['rel'], plan)
+        guard(target)
+        if r['destination'] != str(target) or not re.fullmatch('[a-f0-9]{64}', r['sha256']):
+            raise ValueError('invalid artifact receipt')
+        receipt = {'id': f['id'], 'kind': 'file', 'destination': str(target), 'sha256': r['sha256']}
+        if (agent, f['rel']) == ('omp', 'agent.db'):
+            removals = data.get('removals', [])
+            permitted = {str(target.with_name(n)) for n in ('agent.db-wal', 'agent.db-shm')}
+            if not isinstance(removals, list) or not set(removals) <= permitted:
+                raise ValueError('invalid database removals')
+            receipt['absent_sidecars'] = removals
+        receipts.append(receipt)
+    return receipts
+
+
+def sanitized_report(data, receipts):
+    """Never forward helper warnings/config-derived strings or private digests."""
+    codes = set()
+    categories = (('Selected-file import:', 'runtime_repairs_deferred'),
+                  ('absolute path(s)', 'source_paths_remain'), ('login not copied', 'box_login_required'),
+                  ('Claude login copied without', 'claude_account_fields_missing'),
+                  ('parity check', 'parity_gaps'), ('agent.db copied without', 'source_omp_must_be_stopped'))
+    warnings = data.get('warnings', [])
+    if not isinstance(warnings, list):
+        warnings = []
+    for warning in warnings:
+        if isinstance(warning, str):
+            codes.add(next((code for phrase, code in categories if phrase in warning), 'helper_warning'))
+    targets = [r['destination'] for r in receipts if 'destination' in r]
+    targets += [path for r in receipts for path in r.get('absent_sidecars', [])]
+    backups = []
+    candidates = data.get('backups', []) + (data.get('agent_keys') or {}).get('backups', [])
+    for path in candidates:
+        if isinstance(path, str) and any(path.startswith(t + '.bak.') and
+                re.fullmatch('[A-Za-z0-9_.-]+', path[len(t + '.bak.'):]) for t in targets):
+            backups.append(path)
+    return {'warnings': sorted(codes), 'backups': sorted(set(backups))}
+
+
+def verify_artifacts(state, guard):
+    """Check every selected file/assignment without printing or executing its content."""
+    receipts = state.get('receipts', [])
+    if not isinstance(receipts, list) or len(receipts) != len(state['files']):
+        return False
+    if {r.get('id') for r in receipts} != {f['id'] for f in state['files']}:
+        return False
+    try:
+        for receipt in receipts:
+            kind = receipt['kind']
+            if kind == 'directives':
+                # The selected target files also have transformed-byte receipts.
+                if receipt['id'] != 'keys:rewrites.txt':
+                    return False
+                continue
+            path = Path(receipt['destination'])
+            guard(path)
+            if not path.is_file() or path.stat().st_mode & 0o077:
+                return False
+            if kind == 'file':
+                if digest_file(path) != receipt['sha256']:
+                    return False
+                for absent in receipt.get('absent_sidecars', []):
+                    guard(absent)
+                    if Path(absent).exists():
+                        return False
+            elif kind == 'assignments':
+                names = receipt['assignments']
+                found = {}
+                pattern = importlib.import_module('post_import').ENV_LINE
+                for line in path.read_text(encoding='utf-8').splitlines():
+                    match = pattern.match(line)
+                    if match and match.group(1) in names:
+                        name = match.group(1)
+                        if name in found:
+                            return False
+                        found[name] = hashlib.sha256(line.encode()).hexdigest()
+                if found != names:
+                    return False
+            else:
+                return False
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return True
 
 
 def remove_stage(path):
@@ -369,6 +495,8 @@ def handle(args, root):
         if args.import_command == 'verify':
             if state['phase'] not in ('applied', 'verified'):
                 return public(state, operation)
+            if not verify_artifacts(state, guard):
+                return result('blocked', 'artifact_verification_failed', 'review_import', operation_id=args.id)
             agents = sorted({f['agent'] for f in state['files']} - {'keys'})
             if agents:
                 p = subprocess.run([sys.executable, str(root / 'skills/import-agents/scripts/parity_check.py'),
@@ -397,12 +525,27 @@ def handle(args, root):
         if not args.approve_runtime and any(a != 'keys' for a in agents):
             return result('blocked', 'runtime_approval_required', 'approve_runtime_code', operation_id=args.id)
         # Preflight every destination before the first mutation, including pending keys.
+        receipts = {r['id']: r for r in state.get('receipts', [])}
         for agent in agents:
+            if agent in state['applied']:
+                continue  # Never rebase expected evidence on a later destination state.
             rc, data = call_apply(root, state, operation, agent, dry=True, overwrite=args.overwrite)
-            if rc == 4:
+            if rc == 6:
+                return result('blocked', 'runtime_selection_requires_legacy', 'review_import', operation_id=args.id, agent=agent)
+            if rc == 4 or (data.get('agent_keys') or {}).get('replaced') and not args.overwrite:
                 return result('blocked', 'conflicts', 'approve_overwrite', operation_id=args.id, agent=agent)
             if rc or not data.get('ok'):
                 return result('blocked', 'preflight_failed', 'review_import', operation_id=args.id, agent=agent)
+            try:
+                expected = artifact_receipts(state, operation, agent, data, plan, guard)
+            except (ValueError, KeyError, TypeError):
+                return result('blocked', 'missing_artifact_receipts', 'review_import', operation_id=args.id, agent=agent)
+            receipts.update({r['id']: r for r in expected})
+            previous = state.setdefault('reports', {}).get(agent, {'warnings': [], 'backups': []})
+            report = sanitized_report(data, expected)
+            state['reports'][agent] = {key: sorted(set(previous[key] + report[key])) for key in previous}
+            state['receipts'] = list(receipts.values())
+            save(operation, state, atomic)
         state['phase'] = 'applying'
         save(operation, state, atomic)
         for agent in agents:
@@ -416,9 +559,13 @@ def handle(args, root):
                 remove_stage(scratch)
             shutil.copytree(operation / 'stage', scratch / 'stage')
             try:
-                rc, data = call_apply(root, state, scratch, agent, overwrite=args.overwrite)
+                rc, data = call_apply(root, state, operation, agent, overwrite=args.overwrite, stage=scratch / 'stage')
             finally:
                 remove_stage(scratch)
+            report = sanitized_report(data, [r for r in state['receipts'] if r['id'].startswith(agent + ':')])
+            previous = state['reports'][agent]
+            state['reports'][agent] = {key: sorted(set(previous[key] + report[key])) for key in previous}
+            save(operation, state, atomic)
             if rc or not data.get('ok'):
                 return result('blocked', 'box_login_kept' if rc == 5 else 'apply_incomplete',
                               'review_interrupted_import', operation_id=args.id, agent=agent)

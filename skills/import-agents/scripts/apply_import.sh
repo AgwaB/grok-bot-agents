@@ -40,13 +40,20 @@ def die(msg, code=2):
     print(json.dumps({"ok": False, "error": msg})); sys.exit(code)
 
 STAGE_ROOT = os.environ.get("AGENT_IMPORT_STAGE", "/workspace/uploads/agent-import")
+# Controller mode has an exact file selection. Never infer permission for broad runtime repair.
+selected = None
+if "--selected-files" in args:
+    try:
+        selected = json.loads(args[args.index("--selected-files") + 1])
+        if not isinstance(selected, list) or any(not isinstance(p, str) for p in selected): raise ValueError()
+    except (ValueError, IndexError): die("invalid file selection")
 if args and args[0] == "keys":
     try: r = post_import.merge_agent_keys(STAGE_ROOT, dry=True)
     except (ValueError, OSError): die("unsafe keys or staging path")
     if r and r["replaced"] and "--overwrite" not in args[1:]:
         print(json.dumps({"ok": False, "agent_keys": r})); sys.exit(4)
     if "--dry-run" not in args[1:]:
-        try: r = post_import.merge_agent_keys(STAGE_ROOT, overwrite="--overwrite" in args[1:])
+        try: r = post_import.merge_agent_keys(STAGE_ROOT, overwrite="--overwrite" in args[1:], source_shell=selected is None)
         except post_import.KeyConflict: die("key overwrite approval required", 4)
         except (ValueError, OSError): die("unsafe keys or staging path")
     print(json.dumps({"ok": True, "dry_run": "--dry-run" in args[1:], "agent_keys": r} if r is not None
@@ -151,7 +158,7 @@ def dest_of(rel):
     return os.path.join(dest_root, rel)
 
 ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-plan, skipped, conflicts, warnings = [], [], [], []
+plan, skipped, conflicts, warnings, receipts = [], [], [], [], []
 staged_rels = []  # every allowlisted staged file, installed or identical
 for root, dirs, files in os.walk(stage, followlinks=False):
     for name in dirs[:]:
@@ -169,7 +176,9 @@ for root, dirs, files in os.walk(stage, followlinks=False):
         k = kind_of(rel)
         if not k: skipped.append({"path": rel, "why": "not on the allowlist for " + cli}); continue
         staged_rels.append(rel)
-        if k in ("meta", "overlay"): continue  # used by post_import.py, not copied as-is
+        if k in ("meta", "overlay"):
+            if selected is not None: die("runtime metadata requires a separately reviewed full-consent import", 6)
+            continue  # used by post_import.py, not copied as-is
         if k == "merge":
             plan.append({"rel": rel, "kind": k, "src": full, "dest": claude_global(HOME)}); continue
         dest = dest_of(rel)
@@ -177,11 +186,15 @@ for root, dirs, files in os.walk(stage, followlinks=False):
         except ValueError: die("symlink in destination path")
         data, nrw, nabs = transform(open(full, "rb").read(), rel, k)
         if nabs and k != "dir": warnings.append(f"{rel}: {nabs} absolute path(s) from the other computer remain; check them")
+        receipts.append({"rel": rel, "destination": dest, "sha256": hashlib.sha256(data).hexdigest()})
         if os.path.exists(dest):
             if os.path.islink(dest) or not os.path.isfile(dest): die(f"destination is not a regular file: {dest}")
             if hashlib.sha256(data).hexdigest() == sha(dest): skipped.append({"path": rel, "why": "identical on box"}); continue
             conflicts.append(rel)
         plan.append({"rel": rel, "kind": k, "src": full, "dest": dest, "data": data, "rewrites": nrw})
+
+if selected is not None and (len(selected) != len(set(selected)) or set(staged_rels) != set(selected)):
+    die("staged files do not match the exact selection")
 
 def compact(items):
     """Top-level files listed individually; files inside dirs counted per top-level dir."""
@@ -204,6 +217,8 @@ def summarize_skipped():
 
 out = {"ok": True, "cli": cli, "dry_run": dry, "dest_root": dest_root, "skipped": skipped, "warnings": warnings,
        "installed": [], "backups": [], "conflicts": conflicts}
+if selected is not None:
+    warnings.append("Selected-file import: runtime repairs deferred; review packages, plugins and MCP separately")
 if cli == "omp" and any(x["rel"] == "agent.db" for x in plan) and not any(x["rel"] == "agent.db-wal" for x in plan):
     warnings.append("agent.db copied without agent.db-wal: fine if omp was closed on the other computer, otherwise recent logins may be missing")
 if cli == "claude" and ".credentials.json" not in staged_rels and not os.path.exists(os.path.join(dest_root, ".credentials.json")):
@@ -266,6 +281,17 @@ if db_changed:
                         + ". After import, log in on the box (`omp` then `/login`), or have the user log in on their computer and re-import.")
     elif dead:
         warnings.append(f"omp: some imported logins are disabled: {', '.join(dead)} (others work)")
+
+# Replacing a database also discards unrelated destination sidecars. Preflight those
+# deletions explicitly; selected-file mode verifies their absence before cleanup.
+removals = []
+if db_changed:
+    for n in DB[1:]:
+        stale = os.path.join(dest_root, n)
+        if os.path.isfile(stale) and n not in staged_rels:
+            removals.append(stale)
+            if n not in conflicts: conflicts.append(n)
+out["removals"] = removals
 
 # --- npm deps for imported extensions/skills/packages (bundles exclude node_modules) ---------------
 # Extensions/skills: production deps. Pi packages (settings.json `packages`): all deps, as on the computer, because
@@ -343,16 +369,20 @@ for x in plan[:]:
     existing.update(servers)
     if existing: cur["mcpServers"] = existing
     cur.update(acct)
-    if before == json.dumps(cur, sort_keys=True):
-        plan.remove(x); skipped.append({"path": x["rel"], "why": "identical on box"}); continue
-    x["data"] = json.dumps(cur, indent=2).encode("utf-8"); x["rewrites"] = 0
+    data = json.dumps(cur, indent=2).encode("utf-8")
+    if before == json.dumps(cur, sort_keys=True) and os.path.isfile(dest):
+        data = open(dest, "rb").read()
+        plan.remove(x); skipped.append({"path": x["rel"], "why": "identical on box"})
+    x["data"] = data; x["rewrites"] = 0
+    receipts.append({"rel": x["rel"], "destination": dest, "sha256": hashlib.sha256(data).hexdigest()})
+out["receipts"] = receipts
 
 if conflicts and not overwrite:
     out.update(ok=False, error="existing box files differ; ask the user, then rerun with --overwrite (backs them up)")
     out["planned"] = compact([x["rel"] for x in plan])
     if omp_auth: out["omp_auth"] = omp_auth
     summarize_skipped(); print(json.dumps(out, indent=2)); sys.exit(4)
-try: pending_keys = post_import.merge_agent_keys(STAGE_ROOT, dry=True)
+try: pending_keys = post_import.merge_agent_keys(STAGE_ROOT, dry=True) if selected is None else None
 except (ValueError, OSError): die("unsafe keys or staging path")
 if pending_keys and pending_keys["replaced"] and not overwrite:
     out.update(ok=False, agent_keys=pending_keys, error="key overwrite approval required")
@@ -393,10 +423,10 @@ if db_changed:
         if os.path.isfile(stale) and n not in staged_rels:
             backup(stale); os.remove(stale)
 if os.path.isdir(dest_root): os.chmod(dest_root, 0o700)
-if dep_dirs: out["deps_installed"] = install_deps()
-# packages, plugins, MCP binaries, Mac-only commands (post_import.py), then the parity check (parity_check.py)
+if dep_dirs and selected is None: out["deps_installed"] = install_deps()
+# Partial selections cannot authorize open-ended runtime installers or edits to other files.
 import parity_check
-out["post_install"] = post_import.run(cli, stage, dest_root, warnings)
+out["post_install"] = post_import.run(cli, stage, dest_root, warnings) if selected is None else {"deferred": True}
 
 if not noverify:
     cmd = p["verify"]
