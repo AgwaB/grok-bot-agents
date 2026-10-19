@@ -54,6 +54,24 @@ class SkillContracts(unittest.TestCase):
             self.assertTrue(any('ignored fields' in n for n in data['notes']))
             self.assertFalse(marker.exists())
 
+    def test_generated_agent_run_state_is_ignored_but_config_is_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {'HOME': tmp, 'PATH': '/usr/bin:/bin'}
+            # Test the tracked ignore alone, without local harness .pi/.gitignore files.
+            repo = Path(tmp) / 'repo'
+            subprocess.run(['git', 'init', '-q', str(repo)], env=env, check=True, capture_output=True)
+            (repo / '.gitignore').write_bytes((ROOT / '.gitignore').read_bytes())
+            for path in ('.pi/agent/runs/example/run.json', '.pi/agent/subagent-dispatch/example/receipt.json'):
+                ignored = subprocess.run(['git', '-C', str(repo), 'check-ignore', '--no-index', path],
+                                         env=env, capture_output=True, text=True)
+                self.assertEqual(ignored.returncode, 0)
+            config = subprocess.run(['git', '-C', str(repo), 'check-ignore', '--no-index', '.pi/settings.json'],
+                                    env=env, capture_output=True)
+            self.assertEqual(config.returncode, 1)
+            tracked = subprocess.run(['git', '-C', str(ROOT), 'ls-files', '.pi'], env=env, capture_output=True)
+            self.assertEqual(tracked.returncode, 0)
+            self.assertEqual(tracked.stdout, b'')
+
     def test_version_never_bumped(self):
         self.assertEqual(json.loads((ROOT / '.cursor-plugin/plugin.json').read_text())['version'], '0.1.0')
 

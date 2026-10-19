@@ -8,3 +8,6 @@ __pycache__/
 bridge.env
 *.tgz
 docs/
+# Private, generated local agent orchestration state (not plugin configuration).
+/.pi/agent/runs/
+/.pi/agent/subagent-dispatch/
