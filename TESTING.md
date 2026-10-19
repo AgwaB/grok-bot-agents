@@ -7,10 +7,11 @@ Run from the repository root on Linux with Bash, Python 3, Git and GNU utilities
 ```bash
 python3 tests/delegate_runner_test.py
 env -i PATH=/usr/bin:/bin bash tests/delegate_pi_retry_test.sh
-shellcheck skills/delegate-task/scripts/{run-agent,supervise,resume-run}.sh
+shellcheck skills/delegate-task/scripts/{run-agent,supervise,resume-run,worktree_guard}.sh
 bash -n skills/delegate-task/scripts/run-agent.sh
 bash -n skills/delegate-task/scripts/supervise.sh
 bash -n skills/delegate-task/scripts/resume-run.sh
+bash -n skills/delegate-task/scripts/worktree_guard.sh
 ```
 
 Use your installed `shellcheck`. No CLI download, provider call or real credential/config home
@@ -18,13 +19,14 @@ is needed. The Python suite creates a clean environment, temporary HOME/run root
 fake versions of **all four CLIs** and npm, and disposable Git repositories. The
 existing Bash suite is launched with an empty environment to exclude config overrides.
 
-Latest follow-up evidence: **47 Python tests passed**, **26 Pi-retry Bash checks
-passed**, ShellCheck **zero diagnostics** on all three changed shell scripts; shell
-syntax, temporary-cache Python compilation and `git diff --check` passed. The full
-import suite also passed again (59 Python passes, one PowerShell skip, 26 Bash checks).
-Active LSP probes reported only reviewed numeric-input advisories and a new sibling-module
-import-resolution false positive; real script executions verified that import. No
-production-code suppressions were added.
+Latest review-fix evidence: **62 delegate Python tests passed**, **26 Pi-retry Bash checks
+passed**; ShellCheck reported **zero diagnostics** on all four
+changed shell scripts. Shell syntax, temporary-cache Python compilation and `git diff --check`
+passed. `bash tests/run_import_tests.sh` also passed again: **60 Python tests run, 59 passed,
+one PowerShell skip**, plus **26 Bash auth checks**. All test entry points used `env -i` and
+`mktemp` homes; fixtures never read/write real agent homes or credentials. Active LSP probes
+found no type errors; numeric-parse advisories are bounded by the guard's error handler or
+the supervisor's unknown-evidence fallback. No production suppressions were added.
 Version remains **0.1.0**. Coverage includes:
 
 - omp/Pi zero-exit errors; every reported transport phrase; retry recovery/exhaustion;
@@ -46,6 +48,21 @@ Version remains **0.1.0**. Coverage includes:
 - Missing IDs/files and CLI startup rejection fall back to fresh sessions with retained
   attempt logs. Auth/session-token errors and failures after progress do not replay;
   rate limits never remove the original native worktree. Fake home config sentinels stay unchanged.
+- Review regressions: omp `title` before `session`, malformed prefix/bounded header scans;
+  Claude/Codex startup auth/transport failures retain the requested ID, even without terminal meta.
+  Original-ID native/fresh resumes, direct launches via aliases/different run roots, simultaneous
+  resumes and legacy orphan cwd processes cannot bypass ownership; refusal leaves WIP untouched.
+  Stale metadata cannot target another workdir; ownership is published before legacy processes drain;
+  mocked PID reuse verifies pidfd acquisition precedes identity checks and signals never use bare PIDs.
+- Real local TCP sockets in fake agent children: silent-but-connected Pi/omp stay advisory (including
+  explicit restart); disconnected/idle trees restart only after a full observed window. Other trees'
+  sockets do not count; IPv6 inode joins, unknown/legacy samples and reconnect grace are covered.
+
+`omp --version` reported **omp/18.12.1**. A read-only inspection outside the tests emitted only
+record types/top-level keys from one real session: `title` (`pad,title,type,updatedAt,v`) then
+`session` (`cwd,id,timestamp,type,version`). `tests/fixtures/omp-title-session.jsonl` uses entirely
+invented values; no session content, identifiers, paths or secrets were copied. The runner's
+real-provider/native-resume checks were not repeated for these review fixes.
 
 Before fixes, the first 12 parser tests exposed 28 failing subcases; the five supervision
 regressions failed; recovery/cleanup regressions reproduced permission expansion,
@@ -53,9 +70,14 @@ run-ID overwrite and deletion of agent commits. Historical freeze failure logs
 were also replayed through `summarize_run.py` in a temporary HOME: Codex (recorded rc 1),
 Claude and omp (forced rc 0 to test exit dishonesty) all yielded nonempty summaries,
 `error/conn_error/resumable=true`. Those logs are historical evidence, not new
-provider/platform certification. Global scheduling, simultaneous resumes, reboot/start-time
-PID fencing, cross-worktree session migration, hostile filesystem races and macOS/Windows
-supervision remain untested. See [research and decisions](docs/research/agent-runners.md).
+provider/platform certification. Concurrent same-workdir resumes and stale lock metadata now have
+regressions; actual reboot/PID-reuse and native macOS `ps`/`lsof` ownership fallback were not exercised.
+Global scheduling, cross-worktree session migration, hostile filesystem races, distributed/network
+filesystem locks and macOS/Windows supervision remain untested. Unavailable ownership inspection
+fails closed; safe `--kill` needs Linux/Python pidfd support (otherwise stop owners manually).
+Unavailable TCP evidence cannot authorize a stall restart. TCP is a heuristic, not provider health
+proof; non-TCP waits can still be misjudged and stale sockets can delay recovery.
+See [research and decisions](docs/research/agent-runners.md).
 
 ### Bounded live native-resume check (Linux, 2026-10-19)
 
@@ -164,7 +186,7 @@ separate approval and are outside this test run.
 | Area | How |
 |---|---|
 | Router | `ROUTE_NOW=… GROK_BOT_AGENTS_STATE=/tmp/s.json python3 skills/delegate-task/scripts/route.py decide …`: light → `self`; bulk → pi; long → omp; hard → claude; review of codex → claude. With claude marked limited: hard → codex, review of codex → pi, `--named claude` → `none`/`ask`. The limit expires at the reset time. pi disabled → omp. `fixed` mode is honored |
-| Supervisor | mktemp `HOME` + `AGENT_RUNS_ROOT`, fake `pi` on `PATH`: `supervise.sh` reports `done` (meta ok), `failed` (meta timeout; no process and no meta → `died_no_meta`; stale `agent.pid`), `running next=continue` at slice end, `running next=return` when the budget is used, `running reason=idle_suspected` by default for silent Claude/Codex/unknown runs; `stalled` by default for Pi/omp after no output/session writes and low CPU for `--stall-min`. `--stall-action report|restart` overrides both defaults; recent owned session writes prevent stalls. `resume-run.sh`: refuses a live run without `--kill` and a finished-ok run; `--dry-run` changes nothing; a real resume kills the tree, commits WIP on `agent/<id>`, relaunches `<id>-r2` from that worktree with the same agent, and numbers the next one `-r3` |
+| Supervisor | mktemp `HOME` + `AGENT_RUNS_ROOT`, fake `pi` on `PATH`: `supervise.sh` reports `done` (meta ok), `failed` (meta timeout; no process and no meta → `died_no_meta`; stale `agent.pid`), `running next=continue` at slice end, `running next=return` when the budget is used, `running reason=idle_suspected` by default for silent Claude/Codex/unknown runs; `stalled` by default for Pi/omp after no output/session writes, low CPU and no process-owned established TCP connection for `--stall-min`. `--stall-action report|restart` chooses the action but does not bypass the connection guard; recent session writes, live TCP sockets or unknown liveness prevent restarts. `resume-run.sh`: refuses a live run without `--kill` and a finished-ok run; `--dry-run` changes nothing; a real resume kills the tree, commits WIP on `agent/<id>`, relaunches `<id>-r2` from that worktree with the same agent, and numbers the next one `-r3` |
 | Pi retry + connection errors | `tests/delegate_pi_retry_test.sh`: mktemp `HOME` + `AGENT_RUNS_ROOT`, fake `pi` on `PATH`, 26 checks: a repo run gets `--approve` and a work-dir `.pi/settings.json` of only `{"retry":{"enabled":true}}`, both files stay out of `git status` and are removed afterwards (`pi_retry: on`); `~/.pi/agent/settings.json` is byte-identical; an existing project `.pi/settings.json`, a project or parent `.agents/skills`, or `--review` means no file and no `--approve`; a bare tracked `.pi` dir keeps its files. Exit 0 with last `stopReason: error` and `WebSocket error` (with partial text mentioning quota) → `error`, `error_kind: conn_error`, `resumable: true`, not `rate_limited`; `WebSocket idle timeout` → `conn_error`; `Invalid API key` → plain `error`; an error followed by a retried `stop` → `ok`. `supervise.sh` → `failed reason=conn_error resumable=1` (plain error → `resumable=0`); `resume-run.sh --dry-run` accepts the run |
 | Pi freeze, real (2026-10-19) | `run-agent.sh --agent pi --model openai-codex/gpt-6-luna --reasoning low` in a throwaway repo, 3000-word essay, pi SIGSTOPped 180 s mid-stream: the first message ended `WebSocket error`, pi auto-retried after 2 s and finished (`ok`, `last_stop_reason: stop`, `pi_retry: on`, 234 s, 3801 words); no `.pi` left in the worktree; `~/.pi/agent/settings.json` unchanged. Freeze sweep without retry: 20–75 s recover, 90 s–3 min `WebSocket error`, ≥5 min `WebSocket idle timeout after 300000ms`, exit 0 every time |
 | Reset parsing | `mark-limited claude --message "…resets 11pm (Asia/Seoul)"`, `"reset at 10-21 01:00:00 UTC"`, `"retry-after-ms=…"`, unknown text → +1h |

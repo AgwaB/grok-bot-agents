@@ -4,6 +4,13 @@
 
 First release.
 
+- Fix delegate recovery review findings: discover omp session headers after title records
+  (bounded 32-record scan; synthetic format fixture), retain requested Claude/Codex IDs
+  through early native failures, and lock canonical workdirs across checkpoint/launch
+  with process-start/boot identity, pidfd-safe signals and independent cwd scans. Require a
+  full disconnected, low-CPU/no-write window before stall restart; established process-tree TCP sockets or
+  unknown visibility stay advisory. Add isolated ownership races and loopback-socket tests.
+
 - Add opt-in `resume-run.sh --native` for Claude/Codex/Pi/omp: checkpoint WIP and
   continue the CLI session in the same worktree, with fresh run logs, preserved permissions,
   interrupted-tool verification guidance and explicit fresh-session fallback on missing
@@ -20,7 +27,7 @@ First release.
     preserve actual exit codes, reject missing/truncated completion, classify transport errors
     without mistaking partial output or old retry diagnostics for the final error.
   - Stream Claude partial progress; default stall action is `restart` for Pi/omp (no output,
-    owned session writes or CPU progress), `report` for Claude/Codex and unknown runs.
+    owned session writes, CPU progress or live TCP connection), `report` for Claude/Codex and unknown runs.
     Explicit `--stall-action` overrides either default; retain wake/observation-gap grace
     and atomic metadata publication.
   - Preserve restart permissions/run roots; make dry-run write-free; reject reused/unsafe run IDs,
