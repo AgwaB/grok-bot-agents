@@ -619,6 +619,101 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(self.git(r / "wt", "status", "--porcelain"), "")
         self.assertIn("checkpoint before resume", self.git(r / "wt", "log", "-1", "--format=%s"))
 
+    def background(self, *args, cwd=None):
+        p = subprocess.Popen(list(map(str, args)), cwd=cwd, env=self.env,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        def cleanup():
+            # timeout creates its own process group; use its normal TERM forwarding first.
+            if p.poll() is None:
+                p.terminate()
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(p.pid, signal.SIGKILL)
+                p.wait(timeout=5)
+        self.addCleanup(cleanup)
+        return p
+
+    def wait_file(self, path):
+        deadline = time.monotonic() + 5
+        while not path.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(path.exists(), str(path))
+
+    def test_original_id_cannot_race_a_live_native_continuation(self):
+        m = self.native_run(repo=self.repo())
+        original, work = Path(m["run_dir"]), Path(m["workdir"])
+        self.env.update(FAKE_DELAY="60", FAKE_TOUCH="1")
+        active = self.background("bash", SCRIPTS / "resume-run.sh", original, "--native", "--new-id", "active")
+        self.wait_file(work / "saved.txt")
+        head = self.git(work, "rev-parse", "HEAD")
+        calls = Path(self.env["FAKE_ARGS"] + ".calls").read_bytes()
+        # Both native AND fresh resumes of the original ID must honor its current owner.
+        for flags in (("--native",), (), ("--native", "--dry-run")):
+            refused = self.command("resume-run.sh", original, "--new-id", "blocked", *flags)
+            self.assertEqual(refused.returncode, 5, refused.stderr)
+            self.assertIn("still alive", refused.stdout)
+        # Direct in-place launches must use the same lock, including alias paths/run roots.
+        alias = self.root / "work-alias"
+        alias.symlink_to(work, target_is_directory=True)
+        self.env["AGENT_RUNS_ROOT"] = str(self.root / "other-runs")
+        refused = self.command("run-agent.sh", "--agent", "pi", "--id", "direct", "--prompt", "test",
+                               "--cwd", alias, "--resume", m["session_file"], "--resume-in-place")
+        self.assertEqual(refused.returncode, 5, refused.stderr)
+        self.assertEqual(self.git(work, "rev-parse", "HEAD"), head)
+        self.assertEqual(self.git(work, "status", "--porcelain"), "?? saved.txt")
+        self.assertEqual(Path(self.env["FAKE_ARGS"] + ".calls").read_bytes(), calls)
+        self.assertIsNone(active.poll())
+        self.env.pop("FAKE_TOUCH")
+        self.next_output()
+        p = self.command("resume-run.sh", original, "--native", "--kill", "--new-id", "recovered")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        active.wait(timeout=5)
+        self.assertEqual(json.loads(p.stdout)["workdir"], str(work))
+        self.assertEqual(self.git(work, "status", "--porcelain"), "")
+
+    def test_stale_pid_does_not_skip_legacy_workdir_process_scan(self):
+        m = self.native_run(repo=self.repo())
+        r, work = Path(m["run_dir"]), Path(m["workdir"])
+        subdir = work / "nested"
+        subdir.mkdir()
+        p = self.background("timeout", "60", "sleep", "60", cwd=subdir)
+        (r / "agent.pid").write_text("999999999")
+        (work / "saved.txt").write_text("legacy orphan work")
+        refused = self.command("resume-run.sh", r, "--native")
+        self.assertEqual(refused.returncode, 5, refused.stderr)
+        self.assertEqual(self.git(work, "status", "--porcelain"), "?? saved.txt")
+        self.assertIsNone(p.poll())
+        self.next_output()
+        recovered = self.command("resume-run.sh", r, "--native", "--kill")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        p.wait(timeout=5)
+        self.assertEqual(self.git(work, "status", "--porcelain"), "")
+
+    def test_simultaneous_native_resumes_have_one_owner(self):
+        m = self.native_run()
+        self.env["FAKE_DELAY"] = "2"
+        first = self.background("bash", SCRIPTS / "resume-run.sh", m["run_dir"], "--native", "--new-id", "first")
+        second = self.background("bash", SCRIPTS / "resume-run.sh", m["run_dir"], "--native", "--new-id", "second")
+        results = sorted([first.wait(timeout=10), second.wait(timeout=10)])
+        self.assertEqual(results, [1, 5])  # one fake transport error, one ownership refusal
+        calls = Path(self.env["FAKE_ARGS"] + ".calls").read_text().splitlines()
+        self.assertEqual(len(calls), 2)  # original plus exactly one continuation
+
+    def test_stale_lock_identity_never_targets_reused_pid(self):
+        m = self.native_run()
+        locks = list((Path(self.env["HOME"]) / ".grok-bot-agents/worktree-locks").glob("*.lock"))
+        self.assertEqual(len(locks), 1)
+        owner = json.loads(locks[0].read_text())
+        self.assertIn("start", owner)  # Linux: boot ID + process start ticks
+        owner.update(pid=os.getpid(), start="different-boot:0")
+        locks[0].write_text(json.dumps(owner))
+        # A stale file is not a live kernel lock; never signal its unverified PID.
+        self.next_output()
+        p = self.command("resume-run.sh", m["run_dir"], "--native", "--kill")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(json.loads(p.stdout)["resume_mode"], "native")
+
     def test_native_chain_and_fresh_resume_from_native_keep_saved_work(self):
         m = self.native_run(repo=self.repo())
         original = m["workdir"]

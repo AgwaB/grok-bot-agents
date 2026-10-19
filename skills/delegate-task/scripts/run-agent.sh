@@ -137,6 +137,12 @@ else
   WORKDIR="$RUN_DIR/work"; KIND="work"; mkdir -p "$WORKDIR"
   [ -n "$CWD" ] && EXTRA+=("$(cd "$CWD" && pwd)")
 fi
+# Serialize every writer/reviewer by canonical workdir, not by the original run ID.
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=worktree_guard.sh
+source "$(dirname "$0")/worktree_guard.sh"
+guard_workdir "$WORKDIR" || exit $?
+
 for d in "${INPUTS[@]}"; do EXTRA+=("$(cd "$(dirname "$d")" && pwd)/$(basename "$d")"); done
 ADD_DIRS=()   # --add-dir for claude/codex/omp (pi: paths are listed in the prompt instead)
 for d in "${EXTRA[@]}"; do [ -d "$d" ] && ADD_DIRS+=(--add-dir "$d") || ADD_DIRS+=(--add-dir "$(dirname "$d")"); done
@@ -243,7 +249,8 @@ if [ -n "$RESUME" ]; then
     "$AGENT" "$RESUME" > "$RUN_DIR/resume.json" || die "could not record requested session"
 fi
 # agent.pid / runner.pid let supervise.sh find the process tree (stall checks, restart after a VM pause).
-( cd "$WORKDIR" && exec timeout --kill-after=30 "$TIMEOUT" "${CMD[@]}" ) >"$RUN_DIR/stdout.log" 2>>"$RUN_DIR/stderr.log" </dev/null &
+# Only the resume/runner handoff may reuse ownership; nested agent commands must contend.
+( cd "$WORKDIR" && unset DELEGATE_LOCK_WORKDIR && exec timeout --kill-after=30 "$TIMEOUT" "${CMD[@]}" ) >"$RUN_DIR/stdout.log" 2>>"$RUN_DIR/stderr.log" </dev/null &
 AGENT_PID=$!
 echo "$AGENT_PID" > "$RUN_DIR/agent.pid"; echo "$$" > "$RUN_DIR/runner.pid"
 wait "$AGENT_PID"

@@ -71,31 +71,15 @@ if [ -z "$OLD_WORKDIR" ]; then
   if [ -d "$R/wt" ]; then OLD_WORKDIR="$R/wt"; elif [ -d "$R/work" ]; then OLD_WORKDIR="$R/work"; fi
 fi
 
-# --- old process tree ---
-P=$(cat "$R/agent.pid" 2>/dev/null || true)
-if [ -z "$P" ]; then
-  for c in /proc/[0-9]*; do
-    case "$(readlink "$c/cwd" 2>/dev/null)" in "$R/wt"|"$R/work"|"${OLD_WORKDIR:-/nonexistent}") [ "$(cat "$c/comm" 2>/dev/null)" = timeout ] && { P=${c#/proc/}; break; };; esac
-  done
-fi
-# A stale pid may name another run's timeout: require this run's working directory too.
-[ -n "$P" ] && [ "$(cat "/proc/$P/comm" 2>/dev/null)" != timeout ] && P=""
-if [ -n "$P" ]; then
-  PCWD=$(readlink "/proc/$P/cwd" 2>/dev/null); EXPECTED=$(cat "$R/workdir.path" 2>/dev/null || true)
-  case "$PCWD" in "$R/wt"|"$R/work") ;; *) [ -n "$EXPECTED" ] && [ "$PCWD" = "$EXPECTED" ] || P="";; esac
-fi
-if [ -n "$P" ]; then
-  [ "$KILL" = 1 ] || die "run $OLD_ID is still alive (pid $P); pass --kill to stop it first" 5
-  desc() { local k; for k in $(pgrep -P "$1"); do desc "$k"; echo "$k"; done; }
-  TREE="$(desc "$P") $P"
-  if [ "$DRY" = 0 ]; then
-    # shellcheck disable=SC2086
-    kill -TERM $TREE 2>/dev/null; sleep 5
-    # shellcheck disable=SC2086
-    kill -KILL $TREE 2>/dev/null
-    for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$R/meta.json" ] && break; sleep 1; done   # the old runner writes meta.json
-  fi
-  [ "$DRY" = 1 ] && echo "would stop old process tree: $TREE" >&2 || echo "stopped old process tree: $TREE" >&2
+# Hold ownership across checkpoint and launch, even when an older ID points at a
+# live native continuation. Always scan cwd owners; agent.pid is not authoritative.
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=worktree_guard.sh
+source "$HERE/worktree_guard.sh"
+if [ -d "$OLD_WORKDIR" ]; then
+  OLD_WORKDIR="$(cd "$OLD_WORKDIR" && pwd -P)"
+  KILL_ARG=""; [ "$KILL" = 1 ] && KILL_ARG=--kill
+  guard_workdir "$OLD_WORKDIR" "$KILL_ARG" "$DRY" || exit $?
 fi
 
 # --- agent, model, reasoning of the old run ---
