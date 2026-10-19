@@ -11,7 +11,7 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/delegate-task/scripts"
 FAKE_CLI = r'''#!/usr/bin/env python3
-import json, os, pathlib, subprocess, sys
+import json, os, pathlib, subprocess, sys, time
 if "--help" in sys.argv:
     print("--approve")
     sys.exit(0)
@@ -24,6 +24,7 @@ if os.environ.get("FAKE_COMMIT"):
 if "-o" in sys.argv and "FAKE_RESULT" in os.environ:
     pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text(os.environ["FAKE_RESULT"])
 print(pathlib.Path(os.environ["FAKE_OUTPUT"]).read_text(), end="", flush=True)
+time.sleep(float(os.environ.get("FAKE_DELAY", "0")))
 sys.stderr.write(os.environ.get("FAKE_STDERR", ""))
 sys.exit(int(os.environ.get("FAKE_RC", "0")))
 '''
@@ -78,7 +79,7 @@ class RunnerTests(unittest.TestCase):
     def test_omp_connection_errors_exit_zero(self):
         for error in ("The socket connection was closed unexpectedly", "connection was closed", "closed unexpectedly",
                       "Connection aborted", "timed out", "Request timed out", "error decoding response body",
-                      "error sending request", "WebSocket error", "WebSocket idle timeout after 300000ms"):
+                      "error sending request", "WebSocket error", "WebSocket idle timeout after 300000ms", "terminated"):
             with self.subTest(error=error):
                 m = self.run_agent("omp", [message("partial text about quota", "error", error)])
                 self.assertEqual((m["status"], m["error_kind"], m["resumable"], m["exit_code"]),
@@ -121,6 +122,34 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("--verbose", args)
         self.assertIn("--include-partial-messages", args)
         self.assertEqual(m["error_kind"], "conn_error")
+
+    def test_claude_success_requires_explicit_terminal_verdict(self):
+        m = self.run_agent("claude", [{"type": "assistant", "message": {"content": [{"type": "text", "text": "network error example"}]}},
+                                    {"type": "result", "subtype": "success", "is_error": False, "result": "done"}])
+        self.assertEqual((m["status"], m["summary"]), ("ok", "done"))
+        m = self.run_agent("claude", [{"type": "result", "result": "partial"}])
+        self.assertEqual(m["status"], "error")
+
+    def test_pi_like_truncation_abort_and_retry_exhaustion_fail(self):
+        for agent in ("pi", "omp"):
+            for stop in ("aborted", "length"):
+                with self.subTest(agent=agent, stop=stop):
+                    m = self.run_agent(agent, [message("partial", stop)])
+                    self.assertEqual((m["status"], m["resumable"]), ("error", False))
+            m = self.run_agent(agent, [message("partial", "error", "Request timed out"),
+                                      {"type": "auto_retry_end", "success": False, "finalError": "Connection aborted"}])
+            self.assertEqual(m["error_kind"], "conn_error")
+            self.assertIn("Connection aborted", m["summary"])
+
+    def test_tool_json_cannot_spoof_completion(self):
+        for agent in ("pi", "omp"):
+            m = self.run_agent(agent, [{"type": "message_end", "message": {"role": "toolResult", "content": [message()]}}])
+            self.assertEqual(m["error_kind"], "incomplete_output")
+
+    def test_timeout_beats_even_a_success_event(self):
+        self.env["FAKE_DELAY"] = "5"
+        m = self.run_agent("pi", [message()], extra=("--timeout", "1"))
+        self.assertEqual((m["status"], m["exit_code"]), ("timeout", 124))
 
     def test_last_pi_like_message_wins_not_text_prefix(self):
         for agent in ("pi", "omp"):

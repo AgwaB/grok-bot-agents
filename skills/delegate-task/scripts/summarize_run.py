@@ -71,7 +71,7 @@ for ev in events(raw):
         if typ == "result" or ("is_error" in ev and "result" in ev):
             terminal = True
             result = text_value(ev.get("result"))
-            failed = ev.get("is_error") or str(ev.get("subtype", "")).startswith("error")
+            failed = ev.get("is_error") is not False or ev.get("subtype") != "success"
             failure = (text_value(ev.get("errors")) or result or "Claude result reported an error") if failed else ""
     elif agent == "codex":
         if typ == "turn.started":
@@ -98,7 +98,9 @@ for ev in events(raw):
             content = msg.get("content")
             result = "\n".join(c["text"] for c in content if isinstance(c, dict) and c.get("type") == "text" and isinstance(c.get("text"), str)) if isinstance(content, list) else ""
             failure = str(msg.get("errorMessage") or last_stop or "unknown error") if last_stop in ("error", "aborted") or msg.get("errorMessage") else ""
-            terminal = bool(failure) or last_stop in ("stop", "length")
+            if last_stop == "length" and not failure:
+                failure = "Response truncated: model output token limit (length)"
+            terminal = bool(failure) or last_stop == "stop"
         elif typ == "auto_retry_end" and ev.get("success") is False:
             terminal = True
             failure = text_value(ev.get("finalError")) or failure or "Automatic retries exhausted"
@@ -130,7 +132,7 @@ LIMIT_RE = r"hit your (weekly|daily|usage|session) limit|usage limit|rate.?limit
 CONN_RE = (r"websocket|idle timeout|\bECONN(RESET|REFUSED|ABORTED)\b|\bETIMEDOUT\b|\bEPIPE\b|\bEAI_AGAIN\b|\bENOTFOUND\b|\bENETUNREACH\b"
            r"|\bEHOSTUNREACH\b|socket hang ?up|fetch failed|network (error|connection|is unreachable)|connection (?:was )?(error|reset|closed|lost|refused|aborted|dropped)"
            r"|closed unexpectedly|\btimed out\b|error (decoding response body|sending request)"
-           r"|stream (disconnected|closed|ended|error)|premature close|other side closed|\bUND_ERR|transport failure|provider_transport_failure")
+           r"|stream (disconnected|closed|ended|error)|premature close|other side closed|^terminated$|\bUND_ERR|transport failure|provider_transport_failure")
 error_kind, resumable = "incomplete_output" if incomplete else None, False
 if status == "error" and not review_modified:
     if re.search(LIMIT_RE, errtxt, re.I):
