@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install staged CLI files (copied from the user's computer with CopyToBox) into the box's CLI home.
 #   apply_import.sh <codex|claude|pi|omp> [--src-home /Users/alice] [--dry-run] [--overwrite] [--force-auth] [--keep-stage] [--no-verify]
-#   apply_import.sh keys [--dry-run]     merge the staged _secrets/secrets.env (export_secrets.sh) into ~/.agent-keys
+#   apply_import.sh keys [--dry-run] [--overwrite]     merge the staged _secrets/secrets.env (export_secrets.sh) into ~/.agent-keys
 # Stage: ${AGENT_IMPORT_STAGE:-/workspace/uploads/agent-import}/<cli>/<rel path as in import_plan.py>
 # - Installs only allowlisted paths; anything else (SSH keys, other dotfiles, caches, sessions) is skipped and reported.
 # - Never prints file contents. Rejects symlinks and non-regular files.
@@ -41,8 +41,14 @@ def die(msg, code=2):
 
 STAGE_ROOT = os.environ.get("AGENT_IMPORT_STAGE", "/workspace/uploads/agent-import")
 if args and args[0] == "keys":
-    try: r = post_import.merge_agent_keys(STAGE_ROOT, dry="--dry-run" in args[1:])
+    try: r = post_import.merge_agent_keys(STAGE_ROOT, dry=True)
     except (ValueError, OSError): die("unsafe keys or staging path")
+    if r and r["replaced"] and "--overwrite" not in args[1:]:
+        print(json.dumps({"ok": False, "agent_keys": r})); sys.exit(4)
+    if "--dry-run" not in args[1:]:
+        try: r = post_import.merge_agent_keys(STAGE_ROOT, overwrite="--overwrite" in args[1:])
+        except post_import.KeyConflict: die("key overwrite approval required", 4)
+        except (ValueError, OSError): die("unsafe keys or staging path")
     print(json.dumps({"ok": True, "dry_run": "--dry-run" in args[1:], "agent_keys": r} if r is not None
                      else {"ok": True, "agent_keys": None, "note": "no staged secrets.env"}, indent=2)); sys.exit(0)
 
@@ -346,6 +352,9 @@ if conflicts and not overwrite:
     summarize_skipped(); print(json.dumps(out, indent=2)); sys.exit(4)
 try: pending_keys = post_import.merge_agent_keys(STAGE_ROOT, dry=True)
 except (ValueError, OSError): die("unsafe keys or staging path")
+if pending_keys and pending_keys["replaced"] and not overwrite:
+    out.update(ok=False, agent_keys=pending_keys, error="key overwrite approval required")
+    print(json.dumps(out)); sys.exit(4)
 if dry:
     if pending_keys: out["agent_keys"] = dict(pending_keys, note="merged into ~/.agent-keys on the real run (or `apply_import.sh keys`)")
     if auth_notes: out["auth"] = auth_notes
@@ -367,7 +376,8 @@ def ensure_dir(d):
         os.chmod(x, 0o700)
 
 if pending_keys:
-    try: out["agent_keys"] = post_import.merge_agent_keys(STAGE_ROOT)
+    try: out["agent_keys"] = post_import.merge_agent_keys(STAGE_ROOT, overwrite=overwrite)
+    except post_import.KeyConflict: die("key overwrite approval required", 4)
     except (ValueError, OSError): die("unsafe keys or staging path")
 for x in plan:
     dest = x["dest"]; ensure_dir(os.path.dirname(dest))

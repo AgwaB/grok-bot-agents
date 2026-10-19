@@ -25,6 +25,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from import_safety import MAX_FILE, atomic_write, claude_global, guard_path, package_root
@@ -60,38 +61,90 @@ def agent_keys_names(path=None):
     return names
 
 
-def merge_agent_keys(stage_root, dry=False, keys_path=None):
+class KeyConflict(ValueError):
+    """Selected assignments would replace existing keys without approval."""
+
+
+def merge_agent_keys(
+    stage_root, dry=False, keys_path=None, overwrite=False, source_shell=True
+):
     """Merge <stage_root>/_secrets/secrets.env into ~/.agent-keys. Returns names only."""
     src = os.path.join(stage_root, "_secrets", "secrets.env")
     keys_path = keys_path or os.path.join(HOME, ".agent-keys")
-    guard_path(src); guard_path(keys_path); guard_path(os.path.join(HOME, ".bashrc"))
-    if not os.path.isfile(src): return None
+    guard_path(src)
+    guard_path(keys_path)
+    if source_shell:
+        guard_path(os.path.join(HOME, ".bashrc"))
+    if not os.path.isfile(src):
+        return None
     new, bad = {}, 0
-    for line in open(src, encoding="utf-8", errors="replace").read().splitlines():
-        if not line.strip(): continue
+    for line in Path(src).read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
         m = STAGED_LINE.match(line)
-        if m: new[m.group(1)] = line
-        else: bad += 1
-    cur = open(keys_path, encoding="utf-8", errors="replace").read().splitlines() if os.path.isfile(keys_path) else []
-    out, seen, res = [], set(), {"added": [], "replaced": [], "unchanged": [], "rejected_lines": bad}
+        if m:
+            new[m.group(1)] = line
+        else:
+            bad += 1
+    cur = (
+        Path(keys_path).read_text(encoding="utf-8", errors="replace").splitlines()
+        if os.path.isfile(keys_path)
+        else []
+    )
+    out, seen, res = (
+        [],
+        set(),
+        {"added": [], "replaced": [], "unchanged": [], "rejected_lines": bad},
+    )
     for line in cur:
-        m = ENV_LINE.match(line); n = m.group(1) if m else None
+        m = ENV_LINE.match(line)
+        n = m.group(1) if m else None
         if n in new:
-            if n in seen: continue  # drop a duplicate of a name we set
-            seen.add(n); res["unchanged" if line == new[n] else "replaced"].append(n); out.append(new[n]); continue
+            if n in seen:
+                # A later shell assignment wins; a differing duplicate also needs consent.
+                if line != new[n]:
+                    if n in res["unchanged"]:
+                        res["unchanged"].remove(n)
+                    if n not in res["replaced"]:
+                        res["replaced"].append(n)
+                continue
+            seen.add(n)
+            res["unchanged" if line == new[n] else "replaced"].append(n)
+            out.append(new[n])
+            continue
         out.append(line)
     for n, line in new.items():
-        if n not in seen: out.append(line); res["added"].append(n)
-    for k in ("added", "replaced", "unchanged"): res[k] = sorted(res[k])
+        if n not in seen:
+            out.append(line)
+            res["added"].append(n)
+    for k in ("added", "replaced", "unchanged"):
+        res[k] = sorted(res[k])
     res["keys_file"] = keys_path
-    if dry: return res
-    atomic_write(keys_path, ("\n".join(out) + "\n").encode("utf-8"))
+    if dry:
+        return res
+    if res["replaced"] and not overwrite:
+        raise KeyConflict("existing keys differ; overwrite approval required")
+    data = ("\n".join(out) + "\n").encode("utf-8")
+    res["backups"] = []
+    if os.path.isfile(keys_path) and Path(keys_path).read_bytes() != data:
+        fd, backup = tempfile.mkstemp(
+            prefix=os.path.basename(keys_path) + ".bak.", dir=os.path.dirname(keys_path)
+        )
+        os.close(fd)
+        shutil.copyfile(keys_path, backup)  # mkstemp's private mode is retained
+        res["backups"].append(backup)
+    atomic_write(keys_path, data)
     shred(src)
+    if not source_shell:
+        return res
     rc = os.path.join(HOME, ".bashrc")
-    try: has = "agent-keys" in open(rc, encoding="utf-8", errors="replace").read()
-    except FileNotFoundError: has = False
+    try:
+        has = "agent-keys" in Path(rc).read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        has = False
     if not has:
-        with open(rc, "a", encoding="utf-8") as f: f.write("\n[ -f ~/.agent-keys ] && . ~/.agent-keys\n")
+        with open(rc, "a", encoding="utf-8") as f:
+            f.write("\n[ -f ~/.agent-keys ] && . ~/.agent-keys\n")
         res["bashrc_sources_it"] = "added"
     return res
 

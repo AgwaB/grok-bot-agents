@@ -272,9 +272,13 @@ class ImportMatrix(unittest.TestCase):
         data = "export TEST_KEY='" + self.canary + "'\n"
         self.put("_secrets/secrets.env", data, self.stage)
         before = (self.home / ".agent-keys").read_bytes()
-        self.call("apply_import.sh", "keys", "--dry-run")
+        self.call("apply_import.sh", "keys", "--dry-run", rc=4)
+        self.call("apply_import.sh", "keys", rc=4)
         self.assertTrue(before == (self.home / ".agent-keys").read_bytes())
-        self.call("apply_import.sh", "keys")
+        result = self.call("apply_import.sh", "keys", "--overwrite")
+        backup = Path(result["agent_keys"]["backups"][0])
+        self.assertTrue(backup.read_bytes() == before)
+        self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
         p = self.home / ".agent-keys"
         first = p.read_bytes()
         self.assertEqual(first.count(b"TEST_KEY="), 1)
