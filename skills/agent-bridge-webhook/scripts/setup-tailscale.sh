@@ -69,8 +69,11 @@ print_status() {
   read_state
   if [ "$B_STATE" = Running ]; then
     echo "TAILNET_IP=$B_IP"; echo "DNS_NAME=$B_DNS"
-    curl -fsS -m 3 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 && echo "RESULT_URL=http://$B_IP:$PORT" \
-      || log "bridge_server is not answering on 127.0.0.1:$PORT (bridge-serve.sh start)"
+    if curl -fsS -m 3 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
+      echo "RESULT_URL=http://$B_IP:$PORT"
+    else
+      log "bridge_server is not answering on 127.0.0.1:$PORT (bridge-serve.sh start)"
+    fi
     echo "STATUS=ready"; return 0
   fi
   [ -n "$B_AUTH" ] && echo "LOGIN_URL=$B_AUTH"

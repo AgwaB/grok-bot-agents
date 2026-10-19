@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016 # ck deliberately evaluates quoted expressions after each run.
 # delegate-task: per-run pi retry and conn_error resume. Offline: mktemp HOME, fake pi on PATH; never touches the real ~/.pi.
 set -u
 S="$(cd "$(dirname "$0")/.." && pwd)/skills/delegate-task/scripts"
@@ -28,6 +29,7 @@ chmod +x "$HOME/bin/pi"
 REPO="$T/repo"; git init -q "$REPO"; git -C "$REPO" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
 pass=0 fail=0; ck() { if eval "$2"; then echo "PASS $1"; pass=$((pass+1)); else echo "FAIL $1"; fail=$((fail+1)); fi; }
 run() { FAKE_MODE=$1 FAKE_LOG="$T/$2.log" bash "$S/run-agent.sh" --agent pi --id "$2" "${@:3}" --prompt "hi" > "$T/$2.json" 2>/dev/null; }
+# shellcheck disable=SC2329 # Invoked indirectly by the ck eval expressions below.
 m() { python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m.get(sys.argv[2]))' "$AGENT_RUNS_ROOT/$1/meta.json" "$2"; }
 
 run ok r-ok --cwd "$REPO"
