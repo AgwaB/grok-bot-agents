@@ -62,6 +62,16 @@ def session_info(agent, run_dir, workdir):
                 session = value
         except (ValueError, AttributeError):
             pass
+    if not session and agent in ("claude", "codex"):
+        # A native attempt can fail (or die) before the CLI emits its identity.
+        # Keep the requested ID as fallback, never overriding observed session evidence.
+        try:
+            request = json.loads(read_text(r / "resume.json"))
+            value = request.get("session")
+            if request.get("agent") == agent and isinstance(value, str) and value and not value.startswith("-"):
+                session = value
+        except (ValueError, AttributeError):
+            pass
     matches = []
     if agent in ("pi", "omp"):
         for path in sorted((r / "sessions").glob("*.jsonl")):

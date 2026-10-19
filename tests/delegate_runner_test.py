@@ -520,6 +520,36 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(json.loads(p.stdout)["resume_mode"], "native")
                 self.assertFalse(Path(m["run_dir"] + "-r3").exists())
 
+    def test_native_startup_failure_preserves_requested_claude_codex_identity(self):
+        for agent in ("claude", "codex"):
+            for reason in ("Invalid API key", "error sending request"):
+                with self.subTest(agent=agent, reason=reason):
+                    m = self.native_run(agent)
+                    self.env["FAKE_NATIVE_REJECT"] = reason
+                    p = self.command("resume-run.sh", m["run_dir"], "--native")
+                    self.env.pop("FAKE_NATIVE_REJECT")
+                    self.assertEqual(p.returncode, 1, p.stderr)
+                    failed = json.loads(p.stdout)
+                    self.assertEqual(failed["session_id"], m["session_id"])
+                    self.assertNotIn("falling back", p.stderr)
+                    attempt = Path(failed["run_dir"])
+                    self.assertEqual((attempt / "stdout.log").read_text(), "")
+                    # Even an interrupted summarizer must not break the next resume.
+                    (attempt / "meta.json").unlink()
+                    self.next_output(agent)
+                    p = self.command("resume-run.sh", attempt, "--native")
+                    self.assertEqual(p.returncode, 0, p.stderr)
+                    self.assertEqual(json.loads(p.stdout)["resume_mode"], "native")
+                    args = json.loads(Path(self.env["FAKE_ARGS"]).read_text())
+                    self.assertIn(m["session_id"], args)
+
+    def test_observed_session_id_overrides_requested_identity(self):
+        for agent in ("claude", "codex"):
+            with self.subTest(agent=agent):
+                m = self.run_agent(agent, self.session_events(agent, success=True),
+                                   extra=("--resume", "requested-old-id"))
+                self.assertEqual(m["session_id"], "session-123")
+
     def test_native_invalid_login_session_is_not_resume_rejection(self):
         m = self.native_run()
         self.env["FAKE_NATIVE_REJECT"] = "401 Unauthorized: invalid session token"

@@ -237,6 +237,11 @@ printf '%s\n' "$WORKDIR" > "$RUN_DIR/workdir.path"
 START_HEAD=""
 [ "$KIND" = repo ] && START_HEAD=$(git -C "$WORKDIR" rev-parse HEAD)
 START=$(date +%s)
+# Persist before launch: startup/auth/transport failure may emit no session event at all.
+if [ -n "$RESUME" ]; then
+  python3 -c 'import json,sys; print(json.dumps({"agent":sys.argv[1],"session":sys.argv[2]}))' \
+    "$AGENT" "$RESUME" > "$RUN_DIR/resume.json" || die "could not record requested session"
+fi
 # agent.pid / runner.pid let supervise.sh find the process tree (stall checks, restart after a VM pause).
 ( cd "$WORKDIR" && exec timeout --kill-after=30 "$TIMEOUT" "${CMD[@]}" ) >"$RUN_DIR/stdout.log" 2>>"$RUN_DIR/stderr.log" </dev/null &
 AGENT_PID=$!
