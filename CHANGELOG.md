@@ -4,6 +4,9 @@
 
 First release.
 
+- Generalize the runner research's experiment descriptions and remove machine-local
+  paths/internal investigation notes while retaining findings and source citations.
+
 - Delegate runner hardening (still **0.1.0**), informed by
   [source-backed OSS runner research](docs/research/agent-runners.md):
   - Parse Claude streamed results, Codex terminal failures, and Pi/omp final stop reasons;
