@@ -9,6 +9,7 @@
 # --review DIR [--base REF] -> read-only review in place (no worktree); fails if DIR changes.
 # otherwise / no --cwd -> works in <run-dir>/work; a non-repo --cwd and --input dirs become extra readable dirs.
 set -uo pipefail
+umask 077  # run prompts, transcripts and session data are private
 
 REVIEW="" BASE="" INPUTS=() AGENT="" CWD="" PROMPT="" PROMPT_FILE="" MODEL="" REASONING="" PERM="" TIMEOUT="" RUN_ID="" READONLY=0 RESUME=""
 CONFIG="${GROK_BOT_AGENTS_CONFIG:-${GROK_AGENTS_CONFIG:-$HOME/.grok-bot-agents/config.json}}"
@@ -78,11 +79,18 @@ MODEL="${MODEL:-$CFG_MODEL}"; REASONING="${REASONING:-$CFG_REASONING}"
  PERM="${PERM:-$CFG_PERM}"; TIMEOUT="${TIMEOUT:-$CFG_TIMEOUT}"
 case "$PERM" in full-auto|safe) ;; *) die "--permission must be full-auto or safe";; esac
 [ "$READONLY" = 1 ] && PERM="read-only"
+case "$TIMEOUT" in ''|*[!0-9]*) die "--timeout must be positive seconds";; esac
+[ "$TIMEOUT" -gt 0 ] || die "--timeout must be positive seconds"
+[ -n "$PROMPT_FILE" ] || [ -n "$PROMPT" ] || die "empty prompt"
 
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$AGENT-$RANDOM}"
+case "$RUN_ID" in [!a-zA-Z0-9]*|*[!a-zA-Z0-9._-]*) die "invalid run id";; esac
+mkdir -p "$RUNS_ROOT" || die "could not create runs root"
+RUNS_ROOT="$(cd "$RUNS_ROOT" && pwd -P)"
 RUN_DIR="$RUNS_ROOT/$RUN_ID"
-mkdir -p "$RUN_DIR"
-if [ -n "$PROMPT_FILE" ]; then cp "$PROMPT_FILE" "$RUN_DIR/prompt.md"; else printf '%s\n' "$PROMPT" > "$RUN_DIR/prompt.md"; fi
+# Exclusive allocation: a reused id must never truncate a live run's logs or prompt.
+mkdir "$RUN_DIR" 2>/dev/null || die "run dir already exists or cannot be created: $RUN_DIR"
+if [ -n "$PROMPT_FILE" ]; then cp "$PROMPT_FILE" "$RUN_DIR/prompt.md" || die "could not read prompt file"; else printf '%s\n' "$PROMPT" > "$RUN_DIR/prompt.md"; fi
 [ -s "$RUN_DIR/prompt.md" ] || die "empty prompt"
 
 # --- isolation: git repo -> worktree per task (always); otherwise -> <run-dir>/work ---
@@ -94,7 +102,7 @@ fingerprint() {  # content hash of the tree (+ git status/HEAD when it's a repo)
 }
 if [ -n "$REVIEW" ]; then
   [ -d "$REVIEW" ] || die "review dir not found: $REVIEW"
-  WORKDIR="$(cd "$REVIEW" && pwd)"; KIND="review"
+  WORKDIR="$(cd "$REVIEW" && pwd -P)"; KIND="review"
   if git -C "$WORKDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     if [ -z "$BASE" ]; then
       for b in main master; do git -C "$WORKDIR" rev-parse -q --verify "$b" >/dev/null && { BASE=$(git -C "$WORKDIR" merge-base HEAD "$b"); break; }; done
@@ -209,6 +217,9 @@ esac
 # Log the command without the prompt body.
 printf '%q ' "${CMD[@]:0:${#CMD[@]}-1}" > "$RUN_DIR/cmd.txt"; echo '<prompt.md>' >> "$RUN_DIR/cmd.txt"
 
+printf '%s\n' "$WORKDIR" > "$RUN_DIR/workdir.path"
+START_HEAD=""
+[ "$KIND" = repo ] && START_HEAD=$(git -C "$WORKDIR" rev-parse HEAD)
 START=$(date +%s)
 # agent.pid / runner.pid let supervise.sh find the process tree (stall checks, restart after a VM pause).
 ( cd "$WORKDIR" && exec timeout --kill-after=30 "$TIMEOUT" "${CMD[@]}" ) >"$RUN_DIR/stdout.log" 2>>"$RUN_DIR/stderr.log" </dev/null &
@@ -223,8 +234,11 @@ REVIEW_MODIFIED=""
 if [ -n "$REVIEW" ]; then [ "$(fingerprint "$WORKDIR")" = "$FP_BEFORE" ] || REVIEW_MODIFIED=1; fi
 SUMMARY=$(PI_RETRY="$PI_RETRY" REVIEW_MODIFIED="$REVIEW_MODIFIED" PERM="$PERM" MODEL="$MODEL" REASONING="$REASONING" WORKTREE="$WORKTREE" KIND="$KIND" \
   python3 "$(dirname "$0")/summarize_run.py" "$AGENT" "$RUN_DIR" "$RC" "$((END-START))" "$WORKDIR"); SRC=$?
-# A rate-limited repo run that changed nothing: drop its empty worktree and branch so a retry starts clean.
-if [ "$KIND" = repo ] && printf '%s' "$SUMMARY" | grep -q '"status": "rate_limited"' && [ -z "$(git -C "$WORKDIR" status --porcelain 2>/dev/null)" ]; then
-  git -C "$CWD" worktree remove --force "$WORKDIR" >/dev/null 2>&1 && git -C "$CWD" branch -D "$WORKTREE" >/dev/null 2>&1
+# Drop only a truly unchanged rate-limited worktree. A clean index can contain new commits;
+# ignored artifacts are also saved work, so neither may be discarded to make a retry look clean.
+if [ "$KIND" = repo ] && [ -n "$START_HEAD" ] && printf '%s' "$SUMMARY" | grep -q '"status": "rate_limited"' \
+    && [ "$(git -C "$WORKDIR" rev-parse HEAD 2>/dev/null)" = "$START_HEAD" ] \
+    && CLEAN=$(git -C "$WORKDIR" status --porcelain --ignored 2>/dev/null) && [ -z "$CLEAN" ]; then
+  git -C "$CWD" worktree remove "$WORKDIR" >/dev/null 2>&1 && git -C "$CWD" branch -d "$WORKTREE" >/dev/null 2>&1
 fi
 printf '%s\n' "$SUMMARY"; exit $SRC

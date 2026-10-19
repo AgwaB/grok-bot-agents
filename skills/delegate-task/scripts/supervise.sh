@@ -68,14 +68,20 @@ emit() {  # status next reason [exit]
 }
 
 [ -d "$R" ] || emit failed return no_run_dir
+R="$(cd "$R" && pwd -P)"
 
 fork_count() { dmesg 2>/dev/null | grep -c 'virtual machine fork' || true; }
 
 # Agent process: <run-dir>/agent.pid (written by run-agent.sh), else the process whose cwd is the run's work dir.
 agent_pid() {
-  local p c
-  if [ -f "$R/agent.pid" ]; then   # trust it only while it is still `timeout` (pids are reused after a box restart)
-    p=$(cat "$R/agent.pid" 2>/dev/null); [ -n "$p" ] && [ "$(cat "/proc/$p/comm" 2>/dev/null)" = timeout ] && echo "$p"; return
+  local p c expected
+  if [ -f "$R/agent.pid" ]; then   # a recycled pid can be another run's timeout
+    p=$(cat "$R/agent.pid" 2>/dev/null)
+    if [ -n "$p" ] && [ "$(cat "/proc/$p/comm" 2>/dev/null)" = timeout ]; then
+      c=$(readlink "/proc/$p/cwd" 2>/dev/null); expected=$(cat "$R/workdir.path" 2>/dev/null || true)
+      case "$c" in "$R/wt"|"$R/work") echo "$p";; *) [ -n "$expected" ] && [ "$c" = "$expected" ] && echo "$p";; esac
+    fi
+    return
   fi
   for c in /proc/[0-9]*; do
     p=${c#/proc/}

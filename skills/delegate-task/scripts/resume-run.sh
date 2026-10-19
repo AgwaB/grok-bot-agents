@@ -10,6 +10,7 @@
 #   --dry-run  do the checks, print the plan and the run-agent.sh command; change nothing
 # Agent, model and reasoning are taken from the old run's meta.json or cmd.txt; overrides after -- win.
 set -uo pipefail
+umask 077
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ARG="" NEW_ID="" KILL=0 DRY=0 EXTRA=()
 while [ $# -gt 0 ]; do
@@ -34,11 +35,21 @@ runs_root() {  # same rule as run-agent.sh
 }
 case "$ARG" in /*) R="${ARG%/}";; *) R="$(runs_root)/$ARG";; esac
 [ -d "$R" ] || die "run dir not found: $R"
+R="$(cd "$R" && pwd -P)"
 OLD_ID="$(basename "$R")"; ROOT="$(dirname "$R")"
 [ -f "$R/prompt.md" ] || die "no prompt.md in $R"
 if [ -f "$R/meta.json" ] && python3 -c 'import json,sys; sys.exit(json.load(open(sys.argv[1])).get("status")!="ok")' "$R/meta.json"; then
   die "run $OLD_ID already finished ok; continue it with --resume <session_id> instead"
 fi
+
+# Validate the destination before killing processes or checkpointing work.
+if [ -z "$NEW_ID" ]; then
+  base="${OLD_ID%-r[0-9]*}"; n=2
+  while [ -e "$ROOT/$base-r$n" ]; do n=$((n + 1)); done
+  NEW_ID="$base-r$n"
+fi
+case "$NEW_ID" in [!a-zA-Z0-9]*|*[!a-zA-Z0-9._-]*) die "invalid new run id";; esac
+[ -e "$ROOT/$NEW_ID" ] && die "run dir already exists: $ROOT/$NEW_ID"
 
 # --- old process tree ---
 P=$(cat "$R/agent.pid" 2>/dev/null || true)
@@ -47,8 +58,12 @@ if [ -z "$P" ]; then
     case "$(readlink "$c/cwd" 2>/dev/null)" in "$R/wt"|"$R/work") [ "$(cat "$c/comm" 2>/dev/null)" = timeout ] && { P=${c#/proc/}; break; };; esac
   done
 fi
-# A pid file can outlive a box restart and name an unrelated process: only trust it if it is still `timeout`.
+# A stale pid may name another run's timeout: require this run's working directory too.
 [ -n "$P" ] && [ "$(cat "/proc/$P/comm" 2>/dev/null)" != timeout ] && P=""
+if [ -n "$P" ]; then
+  PCWD=$(readlink "/proc/$P/cwd" 2>/dev/null); EXPECTED=$(cat "$R/workdir.path" 2>/dev/null || true)
+  case "$PCWD" in "$R/wt"|"$R/work") ;; *) [ -n "$EXPECTED" ] && [ "$PCWD" = "$EXPECTED" ] || P="";; esac
+fi
 if [ -n "$P" ]; then
   [ "$KILL" = 1 ] || die "run $OLD_ID is still alive (pid $P); pass --kill to stop it first" 5
   desc() { local k; for k in $(pgrep -P "$1"); do desc "$k"; echo "$k"; done; }
@@ -75,14 +90,24 @@ except Exception:
 try:
     t = shlex.split(open(os.path.join(r, "cmd.txt")).read())
     out["AGENT"] = out["AGENT"] or os.path.basename(t[0])
+    permission = ""
     for i, a in enumerate(t[:-1]):
         n = t[i + 1]
         if a in ("--model", "-m") and not out["MODEL"]: out["MODEL"] = n
         if a in ("--thinking", "--effort") and not out["REASONING"]: out["REASONING"] = n
         if a == "-c" and n.startswith("model_reasoning_effort=") and not out["REASONING"]: out["REASONING"] = n.split("=", 1)[1].strip('"')
-        if a == "--permission-mode" and n == "plan" or a == "--tools" or (a == "-s" and n == "read-only"): out["PERMISSION"] = out["PERMISSION"] or "read-only"
+        if a == "--permission-mode": permission = {"plan": "read-only", "acceptEdits": "safe", "bypassPermissions": "full-auto"}.get(n, permission)
+        if a == "--approval-mode": permission = {"write": "safe", "yolo": "full-auto"}.get(n, permission)
+        if a == "--dangerously-bypass-approvals-and-sandbox": permission = "full-auto"
+        if a == "-s": permission = {"read-only": "read-only", "workspace-write": "safe"}.get(n, permission)
+        if a == "-c" and n.startswith("sandbox_mode="):
+            permission = {"read-only": "read-only", "workspace-write": "safe"}.get(n.split("=", 1)[1].strip('"'), permission)
+        if a == "--tools": permission = "read-only"
+    out["PERMISSION"] = out["PERMISSION"] or permission
 except Exception:
     pass
+# Unknown old permissions must not silently expand to the config's full-auto default.
+out["PERMISSION"] = out["PERMISSION"] or "safe"
 print("\n".join(f"{k}={shlex.quote(v)}" for k, v in out.items()))
 PY
 )"
@@ -106,15 +131,9 @@ elif [ -f "$R/review.diff" ] || grep -q '^Review mode: READ-ONLY' "$R/prompt.md"
   die "review runs have no progress to keep; rerun the review from scratch"
 fi
 
-# --- new id and continuation brief ---
-if [ -z "$NEW_ID" ]; then
-  base="${OLD_ID%-r[0-9]*}"; n=2
-  while [ -e "$ROOT/$base-r$n" ]; do n=$((n + 1)); done
-  NEW_ID="$base-r$n"
-fi
-[ -e "$ROOT/$NEW_ID" ] && die "run dir already exists: $ROOT/$NEW_ID"
+# --- continuation brief (dry-run never writes even a temporary file) ---
 BRIEF="$R/continue-$NEW_ID.md"
-{
+continuation_brief() {
   # The original brief without the blocks run-agent.sh or an earlier resume appended (they are added again).
   awk '/^---$/ {hold=$0; getline nxt; if (nxt ~ /^(Inputs|Review mode|CONTINUATION:)/) exit; print hold; print nxt; next} {print}' "$R/prompt.md"
   echo
@@ -127,21 +146,22 @@ BRIEF="$R/continue-$NEW_ID.md"
   fi
   echo "First check what is already done, keep it, and continue from there. Do not start over or redo finished steps."
   echo "Finish with the same final message format the brief asks for, covering the whole task."
-} > "$BRIEF.tmp"
+}
 
 CMD=(bash "$HERE/run-agent.sh" --agent "$AGENT" --id "$NEW_ID" --prompt-file "$BRIEF")
 [ -n "$SRC_CWD" ] && CMD+=(--cwd "$SRC_CWD")
 [ -n "$MODEL" ] && CMD+=(--model "$MODEL")
 [ -n "$REASONING" ] && CMD+=(--reasoning "$REASONING")
-[ "$PERMISSION" = read-only ] && CMD+=(--read-only)
+if [ "$PERMISSION" = read-only ]; then CMD+=(--read-only); else CMD+=(--permission "$PERMISSION"); fi
 CMD+=("${EXTRA[@]}")
 
 if [ "$DRY" = 1 ]; then
   echo "plan: agent=$AGENT kind=$KIND old=$OLD_ID new=$NEW_ID brief=$BRIEF" >&2
-  echo "brief preview:" >&2; tail -6 "$BRIEF.tmp" >&2; rm -f "$BRIEF.tmp"
-  printf '%q ' "${CMD[@]}"; echo
+  echo "brief preview:" >&2; continuation_brief | tail -6 >&2
+  printf 'AGENT_RUNS_ROOT=%q ' "$ROOT"; printf '%q ' "${CMD[@]}"; echo
   exit 0
 fi
-mv "$BRIEF.tmp" "$BRIEF"
-echo "{\"resumed_from\": \"$OLD_ID\", \"new_id\": \"$NEW_ID\"}" > "$R/resumed.json"
+if ! { continuation_brief > "$BRIEF.tmp" && mv "$BRIEF.tmp" "$BRIEF"; }; then die "could not write continuation brief"; fi
+python3 -c 'import json,sys; print(json.dumps({"resumed_from":sys.argv[1],"new_id":sys.argv[2]}))' "$OLD_ID" "$NEW_ID" > "$R/resumed.json"
+export AGENT_RUNS_ROOT="$ROOT"
 exec "${CMD[@]}"

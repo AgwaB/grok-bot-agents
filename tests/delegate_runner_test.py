@@ -11,11 +11,16 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/delegate-task/scripts"
 FAKE_CLI = r'''#!/usr/bin/env python3
-import json, os, pathlib, sys
+import json, os, pathlib, subprocess, sys
 if "--help" in sys.argv:
     print("--approve")
     sys.exit(0)
 pathlib.Path(os.environ["FAKE_ARGS"]).write_text(json.dumps(sys.argv[1:]))
+if os.environ.get("FAKE_TOUCH"):
+    pathlib.Path("saved.txt").write_text("keep this work")
+if os.environ.get("FAKE_COMMIT"):
+    subprocess.run(["git", "add", "saved.txt"], check=True)
+    subprocess.run(["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-qm", "saved work"], check=True)
 if "-o" in sys.argv and "FAKE_RESULT" in os.environ:
     pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text(os.environ["FAKE_RESULT"])
 print(pathlib.Path(os.environ["FAKE_OUTPUT"]).read_text(), end="", flush=True)
@@ -165,6 +170,105 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(m["error_kind"], "conn_error")
         self.assertIn("error sending request", m["summary"])
 
+    def git(self, repo, *args):
+        return subprocess.run(["git", "-C", str(repo), *args], env=self.env, text=True,
+                              capture_output=True, check=True, timeout=10).stdout.strip()
+
+    def repo(self):
+        repo = self.root / "repo"
+        repo.mkdir()
+        self.git(repo, "init", "-q")
+        self.git(repo, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-qm", "init", "--allow-empty")
+        return repo
+
+    def test_checkpoint_resume_preserves_wip_in_new_worktree(self):
+        repo = self.repo()
+        self.env["FAKE_TOUCH"] = "1"
+        m = self.run_agent("omp", [message("", "error", "Request timed out")], extra=("--cwd", repo, "--permission", "safe"))
+        r = Path(m["run_dir"])
+        self.env.pop("FAKE_TOUCH")
+        Path(self.env["FAKE_OUTPUT"]).write_text(json.dumps(message("resumed")) + "\n")
+        p = self.command("resume-run.sh", r)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        resumed = json.loads(p.stdout)
+        self.assertEqual(resumed["permission"], "safe")
+        self.assertEqual((Path(resumed["workdir"]) / "saved.txt").read_text(), "keep this work")
+        self.assertFalse((repo / "saved.txt").exists())
+        self.assertIn("checkpoint before resume", self.git(r / "wt", "log", "-1", "--format=%s"))
+        self.assertEqual(self.git(r / "wt", "status", "--porcelain"), "")
+
+    def test_rate_limit_cleanup_preserves_agent_commits(self):
+        repo = self.repo()
+        self.env.update(FAKE_TOUCH="1", FAKE_COMMIT="1")
+        m = self.run_agent("omp", [message("", "error", "429 Too many requests")], extra=("--cwd", repo))
+        self.assertEqual(m["status"], "rate_limited")
+        self.assertTrue((Path(m["workdir"]) / "saved.txt").exists())
+        self.git(repo, "rev-parse", "--verify", m["worktree_branch"])
+
+    def test_rate_limit_cleanup_preserves_ignored_artifacts(self):
+        repo = self.repo()
+        (repo / ".gitignore").write_text("saved.txt\n")
+        self.git(repo, "add", ".gitignore")
+        self.git(repo, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-qm", "ignore")
+        self.env["FAKE_TOUCH"] = "1"
+        m = self.run_agent("omp", [message("", "error", "429 Too many requests")], extra=("--cwd", repo))
+        self.assertTrue((Path(m["workdir"]) / "saved.txt").exists())
+
+    def test_empty_rate_limited_worktree_is_cleaned(self):
+        repo = self.repo()
+        m = self.run_agent("omp", [message("", "error", "429 Too many requests")], extra=("--cwd", repo))
+        self.assertEqual(m["status"], "rate_limited")
+        self.assertFalse(Path(m["workdir"]).exists())
+
+    def test_run_ids_are_exclusive_private_and_cannot_escape(self):
+        m = self.run_agent("pi", [message()])
+        r = Path(m["run_dir"])
+        before = (r / "prompt.md").read_bytes()
+        p = self.command("run-agent.sh", "--agent", "pi", "--id", r.name, "--prompt", "overwrite")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual((r / "prompt.md").read_bytes(), before)
+        self.assertEqual(r.stat().st_mode & 0o077, 0)
+        p = self.command("run-agent.sh", "--agent", "pi", "--id", "../escaped", "--prompt", "test")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertFalse((self.root / "escaped").exists())
+
+    def test_resume_preserves_safe_permission_even_without_meta(self):
+        for agent in ("codex", "claude", "omp"):
+            for keep_meta in (True, False):
+                with self.subTest(agent=agent, keep_meta=keep_meta):
+                    events = [message("", "error", "Request timed out")] if agent == "omp" else (
+                        [{"type": "turn.failed", "error": {"message": "Request timed out"}}] if agent == "codex" else
+                        [{"type": "result", "subtype": "success", "is_error": True, "result": "Request timed out"}])
+                    m = self.run_agent(agent, events, extra=("--permission", "safe"))
+                    r = Path(m["run_dir"])
+                    if not keep_meta:
+                        (r / "meta.json").unlink()
+                    p = self.command("resume-run.sh", r, "--dry-run")
+                    self.assertEqual(p.returncode, 0, p.stderr)
+                    self.assertIn("--permission safe", p.stdout)
+
+    def test_resume_dry_run_does_not_write_or_remove_files(self):
+        m = self.run_agent("pi", [message("", "error", "Request timed out")])
+        r = Path(m["run_dir"])
+        sentinel = r / "continue-next.md.tmp"
+        sentinel.write_text("do not overwrite")
+        before = {str(p.relative_to(r)): p.read_bytes() for p in r.rglob("*") if p.is_file()}
+        p = self.command("resume-run.sh", r, "--new-id", "next", "--dry-run")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        after = {str(p.relative_to(r)): p.read_bytes() for p in r.rglob("*") if p.is_file()}
+        self.assertEqual(before, after)
+
+    def test_resume_absolute_run_keeps_its_root(self):
+        m = self.run_agent("omp", [message("", "error", "Request timed out")], extra=("--permission", "safe"))
+        r = Path(m["run_dir"])
+        self.env["AGENT_RUNS_ROOT"] = str(self.root / "other-runs")
+        Path(self.env["FAKE_OUTPUT"]).write_text(json.dumps(message("resumed")) + "\n")
+        p = self.command("resume-run.sh", r)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        resumed = json.loads(p.stdout)
+        self.assertEqual(resumed["run_dir"], str(self.runs / (r.name + "-r2")))
+        self.assertEqual(resumed["permission"], "safe")
+
     def idle_run(self):
         r = self.runs / "idle"
         work = r / "work"
@@ -188,6 +292,20 @@ class RunnerTests(unittest.TestCase):
 
     def supervise(self, r, *args):
         return self.command("supervise.sh", r, "60", "--new", "--slice", "0", "--interval", "1", *args)
+
+    def test_recycled_timeout_pid_is_not_owned_by_another_run(self):
+        _, p = self.idle_run()
+        m = self.run_agent("pi", [message("", "error", "Request timed out")])
+        r = Path(m["run_dir"])
+        (r / "agent.pid").write_text(str(p.pid))
+        proc = self.command("resume-run.sh", r, "--dry-run")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("would stop", proc.stderr)
+        self.assertIsNone(p.poll())
+        (r / "meta.json").unlink()
+        os.utime(r / "prompt.md", (time.time() - 100, time.time() - 100))
+        proc = self.supervise(r)
+        self.assertIn("reason=died_no_meta", proc.stdout)
 
     def test_silent_thinking_is_advisory_by_default(self):
         r, p = self.idle_run()
