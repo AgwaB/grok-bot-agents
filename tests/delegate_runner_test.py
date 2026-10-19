@@ -701,6 +701,85 @@ class RunnerTests(unittest.TestCase):
         calls = Path(self.env["FAKE_ARGS"] + ".calls").read_text().splitlines()
         self.assertEqual(len(calls), 2)  # original plus exactly one continuation
 
+    def test_stale_owner_metadata_cannot_kill_a_different_workdir(self):
+        m = self.native_run()
+        _, unrelated = self.idle_run("pi")
+        lock = next((Path(self.env["HOME"]) / ".grok-bot-agents/worktree-locks").glob("*.lock"))
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        start = Path(f"/proc/{unrelated.pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+        lock.write_text(json.dumps({"pid": unrelated.pid, "start": f"{boot}:{start}"}))
+        # A new/legacy holder has the lock but has not replaced stale owner metadata.
+        ready = self.root / "lock-ready"
+        holder = self.background("python3", "-c", """
+import fcntl, os, pathlib, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR)
+os.dup2(fd, 9)
+fcntl.flock(9, fcntl.LOCK_EX)
+pathlib.Path(sys.argv[2]).touch()
+time.sleep(30)
+""", lock, ready, cwd=m["workdir"])
+        self.wait_file(ready)
+        self.next_output()
+        p = self.command("resume-run.sh", m["run_dir"], "--native", "--kill")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        holder.wait(timeout=5)
+        self.assertIsNone(unrelated.poll())
+
+    def test_new_lock_owner_is_published_before_legacy_processes_drain(self):
+        m = self.native_run()
+        lock = next((Path(self.env["HOME"]) / ".grok-bot-agents/worktree-locks").glob("*.lock"))
+        ready = self.root / "legacy-ready"
+        legacy = self.background("python3", "-c", """
+import pathlib, signal, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+pathlib.Path(sys.argv[1]).touch()
+time.sleep(30)
+""", ready, cwd=m["workdir"])
+        self.wait_file(ready)
+        recovery = self.background("bash", SCRIPTS / "resume-run.sh", m["run_dir"], "--native", "--kill")
+        owner = {}
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try:
+                owner = json.loads(lock.read_text())
+            except ValueError:
+                continue
+            if owner.get("pid") == recovery.pid:
+                break
+            time.sleep(0.02)
+        self.assertEqual(owner.get("pid"), recovery.pid)
+        self.assertIsNone(legacy.poll())  # published before the 3-second TERM grace expires
+        self.assertEqual(recovery.wait(timeout=10), 1)  # fake CLI's transport failure
+        legacy.wait(timeout=5)
+
+    def test_kill_binds_pidfd_before_identity_check_and_never_uses_numeric_kill(self):
+        p = subprocess.run(["python3", "-c", """
+import signal, sys
+from unittest.mock import patch
+sys.path.insert(0, sys.argv[1])
+import worktree_guard as guard
+calls = []
+def opened(pid):
+    calls.append("open")
+    return 42
+def snapshot():
+    calls.append("identity")
+    return {123: (1, "original")}
+def sent(fd, sig):
+    assert fd == 42 and sig == signal.SIGTERM
+    calls.append("signal")
+with patch.object(guard.os, "pidfd_open", side_effect=opened), \\
+     patch.object(guard, "processes", side_effect=snapshot), \\
+     patch.object(guard.signal, "pidfd_send_signal", side_effect=sent) as send, \\
+     patch.object(guard.os, "close"), patch.object(guard.os, "kill") as numeric:
+    guard.signal_same_processes({123: "original"}, signal.SIGTERM)
+    assert calls == ["open", "identity", "signal"], calls
+    guard.signal_same_processes({123: "recycled"}, signal.SIGTERM)
+    assert send.call_count == 1
+    numeric.assert_not_called()
+""", str(SCRIPTS)], env=self.env, text=True, capture_output=True, timeout=5)
+        self.assertEqual(p.returncode, 0, p.stderr)
+
     def test_stale_lock_identity_never_targets_reused_pid(self):
         m = self.native_run()
         locks = list((Path(self.env["HOME"]) / ".grok-bot-agents/worktree-locks").glob("*.lock"))

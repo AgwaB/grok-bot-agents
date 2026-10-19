@@ -93,7 +93,10 @@ def recorded_owner(fd, procs):
         os.lseek(fd, 0, os.SEEK_SET)
         owner = json.loads(os.read(fd, 4096))
         pid = owner["pid"]
-        if procs.get(pid, (None, None))[1] == owner["start"]:
+        # The same shell can move on to a fresh workdir without changing PID/start.
+        # Metadata alone is not proof it still owns this lock (fd 9 may now name B).
+        if (procs.get(pid, (None, None))[1] == owner["start"]
+                and os.path.samestat(os.stat(f"/proc/{pid}/fd/9"), os.fstat(fd))):
             return pid
     except (OSError, ValueError, KeyError, TypeError):
         pass
@@ -101,17 +104,32 @@ def recorded_owner(fd, procs):
 
 
 def signal_same_processes(targets, sig):
-    current = processes()
-    for pid, identity in targets.items():
-        if current.get(pid, (None, None))[1] == identity:
+    if not targets:
+        return
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        raise RuntimeError("safe --kill requires pidfd support; stop workdir processes manually on this host")
+    handles = {}
+    try:
+        # Bind kernel process handles BEFORE checking start identity. A recycled PID
+        # between the check and signal must never target the replacement process.
+        for pid in targets:
             with suppress(ProcessLookupError):
-                os.kill(pid, sig)
+                handles[pid] = os.pidfd_open(pid)
+        current = processes()
+        for pid, handle in handles.items():
+            if current.get(pid, (None, None))[1] == targets[pid]:
+                with suppress(ProcessLookupError):
+                    signal.pidfd_send_signal(handle, sig)
+    finally:
+        for handle in handles.values():
+            os.close(handle)
 
 
 def guard(workdir, owner_pid, fd, kill=False, dry=False):
     deadline = time.monotonic() + 12
     signalled = {}
     term_at = None
+    published = False
     while True:
         procs = processes()
         excluded = ancestors(os.getpid(), procs)
@@ -126,14 +144,17 @@ def guard(workdir, owner_pid, fd, kill=False, dry=False):
         else:
             locked = True  # write-free dry-run, no existing lock file
         owner = recorded_owner(fd, procs) if fd is not None and not locked else None
+        if locked and not dry and not published:
+            # Publish on acquisition, BEFORE draining legacy cwd processes. Otherwise
+            # a concurrent --kill can mistake stale metadata for the new lock holder.
+            assert fd is not None  # acquire always receives the shell's open fd
+            identity = procs[owner_pid][1]
+            data = json.dumps({"pid": owner_pid, "start": identity, "workdir": str(workdir)}) + "\n"
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, data.encode())
+            published = True
         if locked and not live:
-            if not dry:
-                assert fd is not None  # acquire always receives the shell's open fd
-                identity = procs[owner_pid][1]
-                data = json.dumps({"pid": owner_pid, "start": identity, "workdir": str(workdir)}) + "\n"
-                os.ftruncate(fd, 0)
-                os.lseek(fd, 0, os.SEEK_SET)
-                os.write(fd, data.encode())
             return
         if not kill:
             raise RuntimeError("workdir is still alive or locked; pass --kill to stop it first")
