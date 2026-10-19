@@ -229,8 +229,14 @@ def offline(root, selected=None, probe_versions=False):
 def _live_one(root, agent):
     # Recheck at the execution boundary, including changes since diagnostics or
     # an explicitly requested version probe. --live never bypasses integrity.
-    if _managed_integrity(agent)[1] == "managed_install_invalid":
+    managed, integrity = _managed_integrity(agent)
+    if integrity == "managed_install_invalid":
         return {"status": "blocked", "reason": "managed_install_invalid", "quota": "unknown"}
+    # Bind execution to the checked wrapper, not a second PATH/npm-prefix lookup.
+    executable = str(setup.home() / ".local/bin" / agent) if managed else setup.find_executable(agent)
+    if not executable:
+        return {"status": "blocked", "reason": "live_prerequisites_missing", "quota": "unknown"}
+    executable = os.path.abspath(executable)
     runner = root / "skills/delegate-task/scripts/run-agent.sh"
     if not runner.is_file():
         return {"status": "blocked", "reason": "runner_missing", "quota": "unknown"}
@@ -243,7 +249,8 @@ def _live_one(root, agent):
     env["PATH"] = setup.user_path()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     rc, out, _, code = setup.run_captured(
-        [bash, str(runner), "--agent", agent, "--read-only", "--timeout", "120", "--prompt", OK_PROMPT],
+        [bash, str(runner), "--agent", agent, "--executable", executable,
+         "--read-only", "--timeout", "120", "--prompt", OK_PROMPT],
         timeout=150, env=env, cwd=root)
     if code != "ok":
         return {"status": "blocked", "reason": "live_check_failed", "quota": "unknown"}

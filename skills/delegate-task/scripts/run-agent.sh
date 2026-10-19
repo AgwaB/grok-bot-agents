@@ -6,27 +6,24 @@
 #                [--model M] [--reasoning LEVEL] [--permission full-auto|safe] [--read-only]
 #                [--timeout SECONDS] [--id RUN_ID] [--resume SESSION] [--review DIR [--base REF]]
 # --cwd is a git repo  -> its own worktree + branch agent/<run-id> (except resume-run.sh --native).
+# --executable ABS_PATH pins startup probes and execution (internal gba verify handoff).
 # --resume-in-place is the internal resume-run.sh opt-in: requires --cwd and --resume.
 # --review DIR [--base REF] -> read-only review in place (no worktree); fails if DIR changes.
 # otherwise / no --cwd -> works in <run-dir>/work; a non-repo --cwd and --input dirs become extra readable dirs.
 set -uo pipefail
 umask 077  # run prompts, transcripts and session data are private
 
-REVIEW="" BASE="" INPUTS=() AGENT="" CWD="" PROMPT="" PROMPT_FILE="" MODEL="" REASONING="" PERM="" TIMEOUT="" RUN_ID="" READONLY=0 RESUME="" RESUME_IN_PLACE=0
+REVIEW="" BASE="" INPUTS=() AGENT="" EXECUTABLE="" CWD="" PROMPT="" PROMPT_FILE="" MODEL="" REASONING="" PERM="" TIMEOUT="" RUN_ID="" READONLY=0 RESUME="" RESUME_IN_PLACE=0
 CONFIG="${GROK_BOT_AGENTS_CONFIG:-${GROK_AGENTS_CONFIG:-$HOME/.grok-bot-agents/config.json}}"
 if [ -z "${GROK_BOT_AGENTS_CONFIG:-}${GROK_AGENTS_CONFIG:-}" ] && [ ! -e "$CONFIG" ] && [ -e "$HOME/.grok-agents/config.json" ]; then
   CONFIG="$HOME/.grok-agents/config.json"  # legacy dir from before the rename
 fi
-# Bot shells often start without the user-level bin dirs, so add them (npm prefix ~/.local, bun ~/.bun).
-for d in "$HOME/.local/bin" "$HOME/.bun/bin" "$(npm config get prefix 2>/dev/null)/bin"; do
-  [ -d "$d" ] && case ":$PATH:" in *":$d:"*) ;; *) PATH="$d:$PATH";; esac
-done; export PATH
-
 die() { python3 -c 'import json,sys; print(json.dumps({"ok":False,"error":sys.argv[1]}))' "$1"; exit "${2:-2}"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --agent) AGENT="$2"; shift 2;;
+    --executable) EXECUTABLE="${2:-}"; [ -n "$EXECUTABLE" ] || die "--executable requires an absolute path"; shift 2;;
     --cwd) CWD="$2"; shift 2;;
     --input) INPUTS+=("$2"); shift 2;;
     --prompt) PROMPT="$2"; shift 2;;
@@ -50,11 +47,22 @@ done
 [ -n "$AGENT" ] || die "--agent is required"
 case "$AGENT" in codex|claude|pi|omp) ;; *) die "unknown agent $AGENT";; esac
 
+if [ -n "$EXECUTABLE" ]; then
+  case "$EXECUTABLE" in /*) ;; *) die "--executable requires an absolute path";; esac
+  [ -f "$EXECUTABLE" ] && [ -x "$EXECUTABLE" ] || die "selected executable is unavailable" 3
+else
+  # Legacy launches discover user bins; pinned verification must not consult npm.
+  for d in "$HOME/.local/bin" "$HOME/.bun/bin" "$(npm config get prefix 2>/dev/null)/bin"; do
+    [ -d "$d" ] && case ":$PATH:" in *":$d:"*) ;; *) PATH="$d:$PATH";; esac
+  done; export PATH
+  command -v "$AGENT" >/dev/null || die "$AGENT is not installed; run setup-agents" 3
+  EXECUTABLE="$AGENT"
+fi
+
 # API keys kept out of chat live in ~/.agent-keys (mode 600); load them for non-interactive shells.
 # shellcheck disable=SC1091  # optional user-owned runtime file, not a repository source
 [ -f "$HOME/.agent-keys" ] && . "$HOME/.agent-keys"
 
-command -v "$AGENT" >/dev/null || die "$AGENT is not installed; run setup-agents" 3
 [ -z "$CWD" ] || [ -d "$CWD" ] || die "cwd not found: $CWD"
 for d in "${INPUTS[@]}"; do [ -e "$d" ] || die "input not found: $d"; done
 
@@ -174,7 +182,7 @@ pi_retry_setup() {
     [ -e "$cur/.agents/skills" ] && [ "$cur" != "$home" ] && { PI_RETRY="skipped: $cur/.agents/skills needs project trust"; return 1; }
     [ "$cur" = / ] && break; cur="$(dirname "$cur")"
   done
-  pi --help 2>/dev/null | grep -q -- '--approve' || { PI_RETRY="skipped: this pi has no --approve"; return 1; }
+  "$EXECUTABLE" --help 2>/dev/null | grep -q -- '--approve' || { PI_RETRY="skipped: this pi has no --approve"; return 1; }
   [ -d "$d" ] || { mkdir "$d" && PI_RETRY_FILES+=("$d"); }
   if ! { printf '{"retry": {"enabled": true}}\n' > "$d/settings.json" && printf 'settings.json\n.gitignore\n' > "$d/.gitignore"; }; then
     rm -f "$d/settings.json" "$d/.gitignore"; PI_RETRY="skipped: could not write $d"; return 1
@@ -191,7 +199,7 @@ CMD=()
 case "$AGENT" in
   codex)
     # full-auto: --dangerously-bypass-approvals-and-sandbox | safe: -s workspace-write | read-only: -s read-only
-    CMD=(codex exec -C "$WORKDIR" "${ADD_DIRS[@]}")
+    CMD=("$EXECUTABLE" exec -C "$WORKDIR" "${ADD_DIRS[@]}")
     [ -n "$RESUME" ] && CMD+=(resume)   # -C/--add-dir belong to exec, before the resume subcommand
     CMD+=(--json -o "$RUN_DIR/result.md" --skip-git-repo-check)
     case "$PERM" in
@@ -204,7 +212,7 @@ case "$AGENT" in
     [ -n "$RESUME" ] && CMD+=("$RESUME")
     CMD+=("$P");;
   claude)
-    CMD=(claude -p --output-format stream-json --verbose --include-partial-messages "${ADD_DIRS[@]}")
+    CMD=("$EXECUTABLE" -p --output-format stream-json --verbose --include-partial-messages "${ADD_DIRS[@]}")
     case "$PERM" in
       full-auto) CMD+=(--permission-mode bypassPermissions);;
       safe) CMD+=(--permission-mode acceptEdits);;
@@ -216,7 +224,7 @@ case "$AGENT" in
     CMD+=("$P");;
   pi)
     # pi has no approval system: full-auto and safe behave the same; read-only limits tools.
-    CMD=(pi -p --mode json --session-dir "$RUN_DIR/sessions")
+    CMD=("$EXECUTABLE" -p --mode json --session-dir "$RUN_DIR/sessions")
     [ "$PERM" = read-only ] && CMD+=(--tools 'read,grep,find,ls')
     [ -n "$MODEL" ] && CMD+=(--model "$MODEL")
     [ -n "$REASONING" ] && CMD+=(--thinking "$REASONING")
@@ -225,7 +233,7 @@ case "$AGENT" in
     CMD+=("$P");;
   omp)
     # full-auto: --approval-mode yolo | safe: --approval-mode write (exec-tier calls fail closed headless, no hang)
-    CMD=(omp -p --mode json --cwd "$WORKDIR" --max-time "$TIMEOUT" --session-dir "$RUN_DIR/sessions" "${ADD_DIRS[@]}")
+    CMD=("$EXECUTABLE" -p --mode json --cwd "$WORKDIR" --max-time "$TIMEOUT" --session-dir "$RUN_DIR/sessions" "${ADD_DIRS[@]}")
     case "$PERM" in
       full-auto) CMD+=(--approval-mode yolo);;
       safe) CMD+=(--approval-mode write);;

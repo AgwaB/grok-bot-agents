@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import io
 import json
+import os
 import sqlite3
 import sys
 import unittest
@@ -58,19 +59,19 @@ print(''' + repr(version) + ''')
         return {str(path.relative_to(self.home)): (path.stat().st_mtime_ns,
                 path.read_bytes() if path.is_file() else None) for path in self.home.rglob("*")}
 
-    def managed(self):
+    def managed(self, agent="codex", body=None):
         # Construct a private fake receipt directly; never run an installer.
-        prefix = setup.base_dir() / "agents/codex"
+        prefix = setup.base_dir() / "agents" / agent
         prefix.mkdir(parents=True, exist_ok=True)
         payload = prefix / "payload.py"
-        payload.write_text('''import os, pathlib, sys
+        payload.write_text(body if body is not None else '''import os, pathlib, sys
 assert sys.argv[1:] == ["--version"]
 with (pathlib.Path(os.environ["HOME"]) / "managed-starts").open("a") as log: log.write("version\\n")
 print("1.2.3")
 ''')
-        wrapper = self.home / ".local/bin/codex"
+        wrapper = self.home / ".local/bin" / agent
         wrapper.parent.mkdir(parents=True, exist_ok=True)
-        wrapper.write_text("#!" + sys.executable + "\n# gba-managed-v1 codex\nimport runpy\nrunpy.run_path(" + repr(str(payload)) + ")\n")
+        wrapper.write_text("#!" + sys.executable + "\n# gba-managed-v1 " + agent + "\nimport runpy\nrunpy.run_path(" + repr(str(payload)) + ")\n")
         wrapper.chmod(0o755)
         receipt = prefix / "gba-install.json"
         receipt.write_text(json.dumps({"verified": True, "entry": str(payload), "runtime": sys.executable,
@@ -84,7 +85,8 @@ print("1.2.3")
         self.executable("bash", '''import json, os, pathlib, sys
 args = sys.argv[1:]
 assert args[0].endswith("/skills/delegate-task/scripts/run-agent.sh")
-assert args[1:] == ["--agent", "codex", "--read-only", "--timeout", "120", "--prompt", "Reply with exactly: OK"]
+assert args[1:] == ["--agent", "codex", "--executable", str(pathlib.Path(os.environ["HOME"]) / "fakebin/codex"),
+                    "--read-only", "--timeout", "120", "--prompt", "Reply with exactly: OK"]
 with (pathlib.Path(os.environ["HOME"]) / "live-starts").open("a") as log: log.write("live\\n")
 print(''' + repr(payload) + ''')
 print("s3cret_CANARY_must_never_appear", file=sys.stderr)
@@ -235,6 +237,57 @@ sys.exit(''' + str(exit_code) + ''')
         self.assertEqual((self.home / "live-starts").read_text(), "live\n")
         self.assertFalse((self.home / "agent-starts").exists())
         self.assertFalse((self.home / "runtime-starts").exists())
+
+    def test_live_uses_checked_executable_not_off_path_npm_prefix(self):
+        prefix = self.home / "custom npm prefix"
+        (prefix / "bin").mkdir(parents=True)
+        self.executable("npm", '''import os, pathlib, sys
+assert sys.argv[1:] == ["config", "get", "prefix"]
+home = pathlib.Path(os.environ["HOME"])
+(home / "npm-started").touch()
+print(home / "custom npm prefix")
+''')
+        events = {
+            "codex": [{"type": "item.completed", "item": {"type": "agent_message", "text": "OK"}},
+                      {"type": "turn.completed", "usage": {}}],
+            "claude": [{"type": "result", "subtype": "success", "is_error": False, "result": "OK"}],
+            "pi": [{"type": "message_end", "message": {"role": "assistant", "stopReason": "stop",
+                    "content": [{"type": "text", "text": "OK"}]}}],
+        }
+        events["omp"] = events["pi"]
+        for agent, records in events.items():
+            with self.subTest(agent=agent):
+                self.config([agent])
+                wrapper, _, _ = self.managed(agent, '''import json, os, pathlib, sys
+home = pathlib.Path(os.environ["HOME"])
+with (home / "checked-starts").open("a") as log: log.write(json.dumps(sys.argv[1:]) + "\\n")
+if sys.argv[1:] == ["--help"]:
+    print("--approve")
+else:
+    assert sys.argv[-1] == "Reply with exactly: OK"
+    if "-o" in sys.argv: pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text("OK")
+    print(''' + repr("\n".join(json.dumps(record) for record in records)) + ''')
+''')
+                shadow = prefix / "bin" / agent
+                shadow.write_text("#!" + sys.executable + '\nimport os, pathlib\n'
+                                  '(pathlib.Path(os.environ["HOME"]) / "wrong-executable").touch()\n')
+                shadow.chmod(0o700)
+                with mock.patch.dict(os.environ, {"PATH": f"{self.bin}:/usr/bin:/bin",
+                                                  "AGENT_RUNS_ROOT": str(self.home / "runs")}), \
+                        mock.patch.object(doctor, "_parity", return_value={"status": "ok", "agents": {}}):
+                    self.assertNotIn(str(prefix / "bin"), setup.user_path().split(os.pathsep))
+                    response = self.invoke("verify", agents=agent, live=True)
+                self.assertEqual(response["live"]["agents"][agent]["reason"], "live_ok", response)
+                self.assertEqual(response["agents"][agent]["integrity"], "ok")
+                self.assertEqual(response["agents"][agent]["path"], setup.location(str(wrapper)))
+                self.assertFalse((self.home / "wrong-executable").exists())
+                self.assertFalse((self.home / "npm-started").exists())
+                starts = [json.loads(line) for line in (self.home / "checked-starts").read_text().splitlines()]
+                self.assertEqual(len(starts), 2 if agent == "pi" else 1)
+                if agent == "pi":
+                    self.assertEqual(starts[0], ["--help"])
+                    self.assertIn("--approve", starts[1])
+                (self.home / "checked-starts").unlink()
 
     def test_live_quota_is_distinct_from_install_auth_or_version_failure(self):
         self.ready()
