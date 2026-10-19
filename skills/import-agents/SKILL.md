@@ -44,10 +44,12 @@ Use Python 3.11+. See [CLI/input contract](../../README.md#gba-cli), not the She
    returned destinations. `gba import status ID` restores the plan after interruption.
    SHA256 receipts bind the selected source bytes; changed/missing/extra files block application.
 4. `gba import advance ID` checks receipts. After the user trusts imported packages/hooks/config code,
-   add `--approve-runtime`: existing helpers may install dependencies and execute imported runtime code.
-   All selected CLIs preflight before writes. Conflicts require a new approval and `--overwrite` (backups).
-   Interrupted apply requires inspecting effects, then `--retry-interrupted`; never promise rollback.
-5. `gba import verify ID` performs offline parity and removes only that operation's stage on success.
+   add `--approve-runtime`; file-only apply defers broad runtime repairs rather than changing unselected files.
+   All destinations preflight before writes. File/key replacements and stale omp sidecar removal require
+   new approval and `--overwrite` (private backups). `reports` retains sanitized warnings/backup paths.
+   Retry requires stopped helpers and `--retry-interrupted`; unknown ownership blocks. Never promise rollback.
+5. `gba import verify ID` checks every destination/transform and selected key assignment, then offline parity;
+   only complete matching receipts permit staging cleanup. Missing/changed evidence retains staging.
    `gba verify --agents <list>` gives shared diagnostics; only `--live` performs a provider OK-check.
    Quota is not proof of import success. Log in separately on the box if needed; secrets use masked input.
 6. Delete only this import's source exports after confirmed transfer/application; report counts, agent status,
@@ -58,10 +60,11 @@ Use Python 3.11+. See [CLI/input contract](../../README.md#gba-cli), not the She
 Windows callers are less tested; POSIX bundle/export has no Windows twin. Use per-file copies and box
 secret entry if unavailable. Source overrides `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, or `PI_CODING_AGENT_DIR`
 also require per-file transfer rather than `bundle_local.sh`.
-For symlinked skills/external Pi packages, the existing reviewed `bundle_local.sh` → `stage_tar.py` →
+For symlinked skills/external Pi packages, npm overlays or Claude plugin metadata, the existing reviewed `bundle_local.sh` → `stage_tar.py` →
 `apply_import.sh` path remains available outside the controller. Only use it when **every bundled file**
 is covered by whole-file/group consent; `--skip` excludes whole paths, never individual providers.
-Do not use a broad bundle for a partial selection. Controller external `_home` package manifests are not supported.
+Do not use a broad bundle for a partial selection. Runtime repairs need separate full-scope approval;
+controller `_home` manifests/overlays/plugin metadata are rejected, not silently skipped.
 
 The controller wraps apply with `--no-verify`, retains approved receipts for retry, and preserves central
 model/reasoning/auth settings. Legacy direct apply resets model/reasoning to `native` only when auth was

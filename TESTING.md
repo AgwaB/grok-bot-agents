@@ -1,8 +1,8 @@
 # Testing
 
-## gba CLI proposals 1–4 and verified drift (0.1.0, 2026-10-19)
+## gba CLI review fixes (0.1.0, 2026-10-19)
 
-All new evidence is **offline**. No real credentials, provider calls, package downloads, global
+All new test evidence is **offline**. No real credentials, provider calls, package downloads, global
 installs, releases or external writes. Python fixtures use temporary HOME/config/run roots and
 fake CLIs/stores; installers use mocked HTTPS artifacts and fake runtimes. Existing historical
 live results farther below were **not repeated** and do not certify this new CLI.
@@ -26,23 +26,24 @@ git diff --check
 
 Latest results:
 
-- **197 Python tests run: 196 passed, 1 skipped** (PowerShell unavailable). This includes the
-  existing 62 delegate + 60 import methods, not 197 newly added tests.
+- **230 Python tests run: 229 passed, 1 skipped** (PowerShell unavailable). This includes
+  **66 delegate + 60 import-matrix methods** and 104 CLI/config/contract methods; **33 added** in this review fix.
 - `tests/run_import_tests.sh`: **60 tests / 59 passed / 1 skipped**, plus **26 auth Bash checks**;
   embedded-scanner parity, syntax, import ShellCheck and Python compilation passed.
+- Standalone `python3 tests/delegate_runner_test.py`: **66 tests passed**.
 - `tests/delegate_pi_retry_test.sh`: **26 checks passed**.
-- Full `shellcheck -x skills/*/scripts/*.sh tests/*.sh` and Bash syntax: **passed**. A first all-files
-  scan found pre-existing SC2015/SC2016/SC2329 informational patterns; the health conditional is
-  now explicit and intentionally deferred/eval-only test expressions have narrowly explained annotations.
-- The first import-runner invocation could not find ShellCheck on its restricted PATH (exit 2);
-  rerunning with its explicit binary directory passed. No tools were installed to get a pass.
-- Full compilation and `git diff --check`: passed; plugin version remains **0.1.0**.
-- Active LSP error probes covered 15 Python files. One workspace-resolution false positive remains
-  recorded for the executable script's sibling `gba_setup` import; CLI subprocess integration proves
-  it resolves. No production ignore was added. Other probed files had no error diagnostics.
+- Full `shellcheck -x skills/*/scripts/*.sh tests/*.sh`, Bash syntax, full compilation and
+  `git diff --check`: **passed**; plugin version remains **0.1.0**.
+- The first full run exposed an obsolete legacy key-overwrite expectation and local harness ignore
+  interference. The key test now requires consent/backups; the ignore test uses an isolated Git repo.
+  The complete discovery, import runner, Pi retry, syntax, ShellCheck and compile commands then passed.
+- Active LSP error probes covered 12 changed Python files with no unsuppressed errors. Dispositioned
+  findings are not claimed clean; CLI subprocess integration and compilation test actual resolution.
+  Mechanical helper style/file-handle cleanup is isolated from safety fixes; legacy import regressions
+  remain green. Guarded-I/O/valid-mode rule false positives were recorded without production ignores.
 
-New methods: config safety **5**, import controller **15**, setup **19**, run lifecycle **15**,
-shared doctor **12**, CLI integration **5**, skill/webhook contracts **4**. Tests cover:
+Current methods: config safety **5**, import controller **30**, setup **19**, run lifecycle **20**,
+shared doctor **18**, CLI integration **7**, skill/webhook contracts **5**. Tests cover:
 
 - Write-free planning including bytecode, standalone incomplete-plugin refusal, arbitrary cwd,
   stable JSON/exit codes, argument/parser errors and both-output-stream secret canaries.
@@ -54,9 +55,24 @@ shared doctor **12**, CLI integration **5**, skill/webhook contracts **4**. Test
 - Original/custom-ID cap enforcement, simultaneous ledger reservations, native rejection fallback,
   explicit extra attempts, preserved inputs/timeout/permissions, write-free recovery dry-run,
   ownership guards and persistent supervisor handoff/rotation.
-- Offline version/key-name/parity diagnostics; explicit fake live OK versus quota/mismatched output;
+- Static no-execution/no-write key-name/parity diagnostics; opted-in version probes, managed integrity
+  checks before probe/live execution, and fake live OK versus quota/mismatched output;
   config secrets rejected recursively, router JSON/bulk semantics, Pi `max`, and webhook command
   payloads staying data-only.
+
+### Review regression map
+
+| Finding | Fix and representative regression |
+| --- | --- |
+| 1 — key overwrite | Private preflight/backup; `test_key_replacement_requires_approval_and_private_backup`, `test_later_duplicate_key_assignment_also_requires_overwrite`; legacy `test_keys_idempotent` also enforces consent. |
+| 2 — selection scope | File-scoped deterministic transforms, no broad runtime repairs; `test_partial_import_never_runs_unselected_runtime_repairs`, `test_selected_config_transform_backups_and_sanitized_reports_persist`. Warnings/backup paths survive status/verify. Unsupported overlay/plugin metadata is rejected. |
+| 3 — doctor execution | Static by default, `--probe-versions` explicit, integrity before execution; `test_doctor_default_is_static_without_live_or_key_execution`, `test_verify_offline_is_static_and_never_calls_runner`, `test_modified_managed_wrapper_payload_or_receipt_blocks_execution`, `test_omp_static_parity_never_copies_or_writes_database`. |
+| 4 — recovery scope | Persist effective inputs; do not add repository checkout; `test_repo_recovery_never_adds_original_checkout_to_inputs`, `test_legacy_launch_restores_explicit_inputs_but_never_guesses_cwd`; live launch argv covered with fake CLIs. |
+| 5 — interrupted lineage | Ledger reservations survive missing child receipts; `test_interrupted_custom_reservations_keep_root_after_forward_pointer_overwrite`, `test_conflicting_reservations_and_receipts_fail_closed`, `test_corrupt_ledger_evidence_cannot_reset_cap`. |
+| 6 — live writers | Durable group ownership gates launch/retry, drains on timeout/signals; `test_import_timeout_kills_and_drains_helper_process_group`, `test_parent_sigkill_blocks_retry_and_preserves_working_files`, `test_parent_sigterm_drains_children_before_unlock`, `test_helper_gate_prevents_writes_before_ownership_publication`. |
+| 7 — verify artifacts | Private expected-destination and selected-key receipts; `test_verify_requires_each_selected_file_not_just_parity`, `test_verify_requires_selected_keys_and_preserves_stage_on_mismatch`, `test_verify_refuses_missing_receipts_and_skipped_helper_work`; transformed-source bytes also fail verification. |
+| 8 — omp sidecars | Require DB and complete selected group; `test_sidecars_without_database_are_rejected`, `test_legacy_apply_refuses_orphan_sidecar`; stale destination WAL needs approved backup/deletion and verified absence. |
+| 9 — generated state | Narrow tracked ignore rules; `test_generated_agent_run_state_is_ignored_but_config_is_not`; no `.pi/` file is tracked. |
 
 ### Remaining gaps / manual acceptance
 
@@ -67,7 +83,9 @@ shared doctor **12**, CLI integration **5**, skill/webhook contracts **4**. Test
   supervisor dispatch/VM pause recovery were not exercised. The CLI only returns bot handoffs.
 - Import operations serialize controller apply calls locally, but no distributed/legacy-writer lock,
   atomic whole-import rollback or exactly-once retry is claimed. Stop source omp before copying.
-  Symlinked/external Pi packages need the reviewed legacy full-consent fallback, not this controller.
+  Selected-file apply deliberately defers broad runtime repairs. Symlinked/external Pi packages, npm
+  overlays and Claude plugin metadata need the reviewed legacy full-consent fallback. Unknown helper
+  ownership fails closed for manual inspection; it never authorizes automatic replay.
 - Config secret detection is heuristic. Unrecognized values may evade it; high-entropy ordinary text
   may be rejected. No script can prove human consent from a flag or selection file.
 - Download hashes bind HTTPS metadata/artifacts; this is not independent release-signature verification.
@@ -80,8 +98,9 @@ shared doctor **12**, CLI integration **5**, skill/webhook contracts **4**. Test
 Run from the repository root on Linux with Bash, Python 3, Git and GNU utilities:
 
 ```bash
-python3 tests/delegate_runner_test.py
-env -i PATH=/usr/bin:/bin bash tests/delegate_pi_retry_test.sh
+h=$(mktemp -d); trap 'rm -rf "$h"' EXIT
+env -i HOME="$h" PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 python3 tests/delegate_runner_test.py
+env -i HOME="$h" PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 bash tests/delegate_pi_retry_test.sh
 shellcheck skills/delegate-task/scripts/{run-agent,supervise,resume-run,worktree_guard}.sh
 bash -n skills/delegate-task/scripts/run-agent.sh
 bash -n skills/delegate-task/scripts/supervise.sh

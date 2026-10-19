@@ -168,12 +168,20 @@ schema/reason/action must stop for review. Never execute returned text or webhoo
 | `gba import plan --inventory inventory.json --selection selected.json` | Allocate unique private operation/stage after user consent |
 | `gba import status ID` | Read persisted phase/transfer instructions after interruption |
 | `gba import advance ID [--approve-runtime] [--overwrite] [--retry-interrupted]` | Check exact receipts, all-agent preflight, then existing apply helpers; flags require the stated approvals |
-| `gba import verify ID` | Offline parity, then cleanup only that stage; no provider call |
+| `gba import verify ID` | Check every artifact/transform and selected key assignment, then offline parity; only verified stages are removed |
 | `gba runs list --open` / `gba runs next ID` | Persistent lineage, attempts and bounded supervision decision; next performs one observation |
 | `gba runs next ID --handoff\|--supervisor-started\|--rotate` | Persist bot supervisor handoff/acknowledgement/rotation; does not dispatch a subagent |
 | `gba runs recover ID [--dry-run] [--native] [--kill] [--allow-extra-restart]` | Existing guarded recovery; two automatic restarts per lineage, extra attempts only with explicit user approval |
-| `gba doctor --json` / `gba verify --agents pi,codex` | Offline config, executable/version, key-name presence and parity diagnostics |
+| `gba doctor --json` / `gba verify --agents pi,codex` | Static config, executable presence/integrity, key-name presence and parity diagnostics; no processes or writes |
+| `gba doctor --probe-versions` / `gba verify --agents pi --probe-versions` | Explicit agent/runtime `--version` execution; may have filesystem/network side effects |
 | `gba verify --agents pi --live` | Explicit exact-OK provider request; quota is reported separately, never counted as OK |
+
+Default diagnostics leave versions `null` with `version_status:not_requested` (runtime `status:not_requested`);
+this is not a verification failure. Obtain runtime-use approval before `--probe-versions`: output capture is
+not a sandbox, and a binary can access HOME or cause side effects. `--live` does not imply version probes.
+Managed wrapper and payload integrity is checked before either opted-in execution; changed/incomplete
+managed installs block execution. Static omp auth inspection defers WAL-backed status rather than copying
+or opening a writable database; this is reported as a degraded parity check.
 
 Installer downloads use HTTPS plus Node SHA256 manifests and npm registry SHA512 integrity; npm checks
 dependency integrity, lifecycle scripts are disabled. User-local wrappers keep the required Node/Bun on PATH.
@@ -196,21 +204,31 @@ Each row is one concrete allowlisted regular file, never a directory/provider se
 absolute source path ending in the same allowlisted relative path (for CLI-dir overrides or exported logins).
 `agent:"keys", rel:"secrets.env"` additionally requires `names:["OPENAI_API_KEY"]`; actual exported names must
 match exactly. `keys:rewrites.txt` is allowed only for selected destination files and selected exported names.
-`selected.json` is an array such as `["pi:auth.json"]`, not a provider sub-selection. Use all existing omp sidecars.
+`selected.json` is an array such as `["pi:auth.json"]`, not a provider sub-selection. Use all existing omp sidecars;
+a sidecar inventory without `agent.db` is rejected.
 Inventory and selection files must not contain values. Hashes bind bytes, not user approval or source identity;
 the bot must present the card and use the approved machine/path. Never manufacture consent from JSON.
 
 State is private under `~/.grok-bot-agents/imports/import-<uuid>/`; transfers target its `stage/`.
 Missing/changed/extra receipts block before apply. `--approve-runtime` acknowledges executable packages/hooks
-and config code; allowlisting is not a trust review. Conflicts stop before writes and require `--overwrite`.
+and config code; allowlisting is not a trust review. Selected-file apply never runs broad post-install repairs
+or dependency installers; it imports selected files with deterministic home/key-reference/file-store transforms.
+Runtime repairs are deferred in sanitized `reports` instead of rewriting unselected settings. Plugin metadata,
+npm overlays and external Pi `_home` manifests require a separately reviewed full-consent legacy operation.
+File/key replacements and stale destination omp sidecar removal require `--overwrite`, with private backups.
+Warnings and backup paths persist in `status`/`verify`; secret values and private verification hashes do not.
 An interrupted helper leaves phase `applying`; inspect effects and explicitly use `--retry-interrupted`.
-Completed agent receipts are retained; retries are not whole-import rollback or exactly-once execution.
-Controller apply calls are serialized on the local host; legacy direct scripts/external writers are not locked.
-External Pi `_home` package manifests and symlink dereferencing use the reviewed legacy fallback, not this controller.
-Keep source exports private until verified, then delete only those belonging to this import.
+Helper process-group ownership is recorded before execution. Live writers block all controller imports;
+timeouts/handled signals drain the whole group before unlock or scratch cleanup. Unknown launch ownership
+fails closed for manual inspection. Legacy scripts/external writers are not covered by this local lock.
+Every selected destination/transform and key assignment must still match private preflight receipts before
+staging cleanup, including keys-only imports; missing evidence retains staging. Retries are not whole-import
+rollback or exactly-once execution. Keep source exports private until verified, then delete only this import's exports.
 
 Run recovery stores original inputs/timeout and a durable lineage ledger; resuming the original ID or choosing
-a different continuation ID cannot reset the cap. Native/fresh fallback consumes the same budget.
+a different continuation ID cannot reset the cap, even before child receipt publication. Conflicting ledger
+ownership fails closed. Native/fresh fallback consumes the same budget. Effective inputs are recorded at launch;
+recovery never adds the original repository checkout implicitly. Legacy receipts restore explicit inputs only.
 Supervisors must still be real bot subagents rotated every 30 minutes; background processes alone do not keep
 this VM awake. Recovery checks interrupted effects before replay and retains existing worktree/process guards.
 
@@ -224,7 +242,7 @@ Bridge `git`/`command` reply types are recorded only; **outbox is the only imple
 ```
 .cursor-plugin/plugin.json
 assets/logo.svg, logo.png
-scripts/gba, gba_{import,setup,runs,doctor}.py
+scripts/gba, gba_{import,import_process,setup,runs,doctor}.py
 skills/
   setup-agents/SKILL.md
   import-agents/       SKILL.md, scripts/{import_plan.py, detect_local.sh, bundle_local.sh, stage_tar.py, apply_import.sh}

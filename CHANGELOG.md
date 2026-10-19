@@ -4,6 +4,29 @@
 
 First release.
 
+- Fix all eight major gba CLI review findings (still **0.1.0**):
+  - Key replacements, including differing duplicate assignments, require explicit overwrite approval
+    and a private backup; legacy direct apply follows the same rule.
+  - Pass the exact import selection to helpers. Copy/transform only consented files, defer broad
+    runtime repair, reject unsupported metadata rather than silently skipping it, and persist
+    sanitized warning/backup receipts. Do not rewrite unselected settings or shell startup files.
+  - Make doctor/offline verify static by default. Agent/runtime version execution requires
+    `--probe-versions`; managed integrity is checked before both version and live execution.
+  - Persist launch kind/effective inputs; fresh/native recovery cannot add the original repository
+    checkout as an implicit input. Legacy receipts restore explicit inputs only.
+  - Resolve interrupted custom continuation IDs through durable ledger reservations; missing child
+    receipts or overwritten forward pointers cannot reset the restart cap. Conflicting claims block.
+  - Gate helper execution on durable process-group ownership. Live groups block replay; timeout and
+    handled signals drain descendants before releasing the apply lock or removing working files.
+  - Require private per-artifact destination/transform and selected-key verification receipts before
+    deleting staging, even for keys-only imports; missing, changed or skipped artifacts block cleanup.
+  - Reject omp sidecars without `agent.db`; stale destination sidecars require approved backup/removal
+    and their absence is verified with the database receipt.
+- Add narrow generated-agent-state ignore rules; never track `.pi/` orchestration artifacts.
+  Add **33 regression methods**: **230 Python tests / 229 passed / 1 optional PowerShell skip**,
+  plus **26 auth + 26 Pi-retry Bash checks**. Full ShellCheck, syntax and compilation pass.
+  Updated skill contracts total **334 lines**; see `TESTING.md` for the per-finding test map and limits.
+
 - Add the thin, plugin-relative Python 3.11+ stdlib `scripts/gba` CLI (still **0.1.0**),
   with schema-1 JSON, fixed reason codes, exit statuses, and bot-only approval/action handoffs:
   - Consent-bound imports: concrete allowlisted files, whole-file/provider consent, grouped omp
@@ -15,8 +38,8 @@ First release.
   - Persistent run lineage, original inputs/timeout and supervisor handoffs; enforce two automatic
     restarts across original/custom IDs and native fallbacks with an atomic local ledger.
     Further attempts require `--allow-extra-restart`; existing ownership/native/kill guards remain.
-  - Offline doctor/verify combines sanitized versions, config, key-name presence and parity;
-    only explicit `verify --live` requests exact OK, with quota reported separately.
+  - Offline doctor/verify combines static config, key-name presence and parity; versions require
+    `--probe-versions`. Only explicit `verify --live` requests exact OK, with quota reported separately.
 - Correct verified skill drift: router JSON and bulk thresholds, Pi `max`, whole-file consent,
   scanners' internal reads, all CLI-directory overrides, Windows limits, settings-only defaults,
   and outbox-only webhook replies. Reject secret-looking config values in arbitrary/nested fields,
