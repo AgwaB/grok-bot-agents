@@ -310,10 +310,12 @@ def artifact_receipts(state, operation, agent, data, plan, guard):
         receipt = {'id': f['id'], 'kind': 'file', 'destination': str(target), 'sha256': r['sha256']}
         if (agent, f['rel']) == ('omp', 'agent.db'):
             removals = data.get('removals', [])
-            permitted = {str(target.with_name(n)) for n in ('agent.db-wal', 'agent.db-shm')}
-            if not isinstance(removals, list) or not set(removals) <= permitted:
+            selected = {f['rel'] for f in files}
+            omitted = {str(target.with_name(n)) for n in ('agent.db-wal', 'agent.db-shm') if n not in selected}
+            if not isinstance(removals, list) or not set(removals) <= omitted:
                 raise ValueError('invalid database removals')
-            receipt['absent_sidecars'] = removals
+            # Selection defines the whole group, not which deletions remain today.
+            receipt['absent_sidecars'] = sorted(omitted)
         receipts.append(receipt)
     return receipts
 
@@ -546,7 +548,11 @@ def handle(args, root):
                 expected = artifact_receipts(state, operation, agent, data, plan, guard)
             except (ValueError, KeyError, TypeError):
                 return result('blocked', 'missing_artifact_receipts', 'review_import', operation_id=args.id, agent=agent)
-            receipts.update({r['id']: r for r in expected})
+            for receipt in expected:
+                if 'absent_sidecars' in receipt:
+                    previous_absent = receipts.get(receipt['id'], {}).get('absent_sidecars', [])
+                    receipt['absent_sidecars'] = sorted(set(previous_absent) | set(receipt['absent_sidecars']))
+                receipts[receipt['id']] = receipt
             previous = state.setdefault('reports', {}).get(agent, {'warnings': [], 'backups': []})
             report = sanitized_report(data, expected)
             state['reports'][agent] = {key: sorted(set(previous[key] + report[key])) for key in previous}

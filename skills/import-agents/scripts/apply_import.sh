@@ -219,7 +219,7 @@ out = {"ok": True, "cli": cli, "dry_run": dry, "dest_root": dest_root, "skipped"
        "installed": [], "backups": [], "conflicts": conflicts}
 if selected is not None:
     warnings.append("Selected-file import: runtime repairs deferred; review packages, plugins and MCP separately")
-if cli == "omp" and any(x["rel"] == "agent.db" for x in plan) and not any(x["rel"] == "agent.db-wal" for x in plan):
+if cli == "omp" and "agent.db" in staged_rels and "agent.db-wal" not in staged_rels:
     warnings.append("agent.db copied without agent.db-wal: fine if omp was closed on the other computer, otherwise recent logins may be missing")
 if cli == "claude" and ".credentials.json" not in staged_rels and not os.path.exists(os.path.join(dest_root, ".credentials.json")):
     warnings.append("Claude login not copied (default): log in on the box with `claude auth login` (setup-agents headless recipe)")
@@ -256,10 +256,15 @@ omp_auth = None
 DB = ("agent.db", "agent.db-wal", "agent.db-shm")  # one unit: logins may sit only in the WAL
 if cli == "omp" and any(n in staged_rels for n in DB[1:]) and "agent.db" not in staged_rels:
     die("omp database sidecars require agent.db")
-db_changed = cli == "omp" and any(x["rel"] in DB for x in plan)
-if db_changed:
+# Reconcile the selected database GROUP, including byte-identical files on retry.
+db_selected = cli == "omp" and "agent.db" in staged_rels
+if db_selected:
     try:
-        for n in DB: guard_path(os.path.join(dest_root, n))
+        for n in DB:
+            target = os.path.join(dest_root, n)
+            guard_path(target)
+            if os.path.exists(target) and not os.path.isfile(target):
+                die("omp destination database must contain regular files")
     except ValueError: die("symlink in omp destination database")
     staged_c, box_c = omp_creds(stage), omp_creds(dest_root)
     s_ok = [c["provider"] for c in staged_c or [] if c["enabled"]]
@@ -267,7 +272,7 @@ if db_changed:
     omp_auth = {"staged": staged_c, "box": box_c, "action": "replace"}
     dead = sorted({c["provider"] for c in staged_c or [] if not c["enabled"]} - set(s_ok))
     if not s_ok and b_ok and not force_auth:
-        omp_auth["action"] = "kept_box_login"; db_changed = False
+        omp_auth["action"] = "kept_box_login"; db_selected = False
         plan = [x for x in plan if x["rel"] not in DB]
         conflicts = [r for r in conflicts if r not in DB]; out["conflicts"] = conflicts
         for r in DB:
@@ -282,10 +287,10 @@ if db_changed:
     elif dead:
         warnings.append(f"omp: some imported logins are disabled: {', '.join(dead)} (others work)")
 
-# Replacing a database also discards unrelated destination sidecars. Preflight those
-# deletions explicitly; selected-file mode verifies their absence before cleanup.
+# A selected database excludes omitted sidecars even if its bytes already match.
+# Preflight those deletions explicitly; the controller records absence independently.
 removals = []
-if db_changed:
+if db_selected:
     for n in DB[1:]:
         stale = os.path.join(dest_root, n)
         if os.path.isfile(stale) and n not in staged_rels:
@@ -416,8 +421,8 @@ for x in plan:
     if os.path.exists(dest): backup(dest)
     atomic_write(dest, x["data"], 0o700 if x["kind"] not in ("auth", "merge") and os.stat(x["src"]).st_mode & 0o111 else 0o600)
     out["installed"].append({"rel": x["rel"], "kind": x["kind"], "dest": dest, "home_rewrites": x["rewrites"]})
-if db_changed:
-    # a box WAL/SHM left beside a replaced agent.db would be replayed into it: back up and remove
+if db_selected:
+    # A foreign WAL/SHM must not survive, including after an interrupted replacement.
     for n in DB[1:]:
         stale = os.path.join(dest_root, n)
         if os.path.isfile(stale) and n not in staged_rels:

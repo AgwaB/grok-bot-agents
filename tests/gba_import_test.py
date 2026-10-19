@@ -306,6 +306,104 @@ class ImportController(unittest.TestCase):
         with patch.object(IMPORT.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')):
             self.assertEqual(self.invoke('verify', op['operation_id'])['phase'], 'verified')
 
+    def test_identical_database_reconciles_stale_sidecars(self):
+        op = self.fixture_import('omp', 'agent.db', b'fixture database')
+        db = self.home / '.omp/agent/agent.db'
+        db.parent.mkdir(parents=True)
+        db.write_bytes(self.content)
+        db.chmod(0o600)
+        sidecars = [db.with_name(name) for name in ('agent.db-wal', 'agent.db-shm')]
+        for sidecar in sidecars:
+            sidecar.write_bytes(b'foreign sidecar')
+        ident = op['operation_id']
+        self.assertEqual(self.invoke('advance', ident, '--approve-runtime')['reason'], 'conflicts')
+        self.assertTrue(all(path.exists() for path in sidecars))
+        self.assertEqual(list(db.parent.glob('*.bak.*')), [])
+        result = self.invoke('advance', ident, '--approve-runtime', '--overwrite')
+        self.assertEqual(result['phase'], 'applied')
+        self.assertTrue(all(not path.exists() for path in sidecars))
+        self.assertEqual(len(result['reports']['omp']['backups']), 2)
+        self.assertTrue(all(Path(p).stat().st_mode & 0o777 == 0o600 for p in result['reports']['omp']['backups']))
+        self.assertEqual(IMPORT.digest_file(db), hashlib.sha256(self.content).hexdigest())
+
+    def test_database_absence_receipts_cover_sidecars_missing_at_preflight(self):
+        op = self.fixture_import('omp', 'agent.db', b'fixture database')
+        ident = op['operation_id']
+        self.assertEqual(self.invoke('advance', ident, '--approve-runtime')['phase'], 'applied')
+        operation = Path(op['stage']).parent
+        state = json.loads((operation / 'state.json').read_text())
+        db = self.home / '.omp/agent/agent.db'
+        sidecars = [db.with_name(name) for name in ('agent.db-wal', 'agent.db-shm')]
+        self.assertEqual(set(state['receipts'][0]['absent_sidecars']), set(map(str, sidecars)))
+        for path in sidecars:
+            path.write_bytes(b'foreign sidecar')
+            self.assertEqual(self.invoke('verify', ident)['reason'], 'artifact_verification_failed')
+            self.assertTrue(Path(op['stage']).exists())
+            path.unlink()
+        with patch.object(IMPORT.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')):
+            self.assertEqual(self.invoke('verify', ident)['phase'], 'verified')
+
+    def test_database_retry_after_replace_before_sidecar_removal(self):
+        op = self.fixture_import('omp', 'agent.db', b'new fixture database')
+        ident = op['operation_id']
+        db = self.home / '.omp/agent/agent.db'
+        db.parent.mkdir(parents=True)
+        db.write_bytes(b'old fixture database')
+        wal = db.with_name('agent.db-wal')
+        wal.write_bytes(b'foreign WAL')
+        # Fault injection in the real subprocess helper, immediately AFTER atomic
+        # DB replacement and BEFORE sidecar cleanup. No production test hook.
+        python = self.home / '.local/bin/python3'
+        python.write_text('#!' + sys.executable + '''
+import os, signal, sys
+sys.argv = sys.argv[1:]
+sys.path.insert(0, sys.argv[1])
+import import_safety
+original = import_safety.atomic_write
+def interrupt(path, *args, **kwargs):
+    original(path, *args, **kwargs)
+    if os.path.basename(path) == 'agent.db':
+        os.kill(os.getpid(), signal.SIGKILL)
+import_safety.atomic_write = interrupt
+exec(compile(sys.stdin.read(), '<apply_import>', 'exec'))
+''')
+        python.chmod(0o700)
+        try:
+            result = self.invoke('advance', ident, '--approve-runtime', '--overwrite')
+        finally:
+            python.unlink()
+        self.assertEqual(result['reason'], 'apply_incomplete')
+        self.assertEqual(IMPORT.digest_file(db), hashlib.sha256(self.content).hexdigest())
+        self.assertTrue(wal.exists())
+        state_path = Path(op['stage']).parent / 'state.json'
+        expected = json.loads(state_path.read_text())['receipts'][0]['absent_sidecars']
+        self.assertEqual(self.invoke('advance', ident)['reason'], 'interrupted_apply')
+        self.assertEqual(self.invoke('advance', ident, '--approve-runtime', '--retry-interrupted')['reason'], 'conflicts')
+        self.assertTrue(wal.exists())
+        # Also lose the completion receipt after a successful cleanup. The next
+        # preflight sees no deletions, but must retain every absence expectation.
+        real_apply = IMPORT.call_apply
+        def lose_completion(*args, **kwargs):
+            rc, data = real_apply(*args, **kwargs)
+            return (99, {}) if not kwargs.get('dry') and rc == 0 else (rc, data)
+        with patch.object(IMPORT, 'call_apply', side_effect=lose_completion):
+            result = self.invoke('advance', ident, '--approve-runtime', '--retry-interrupted', '--overwrite')
+        self.assertEqual(result['reason'], 'apply_incomplete')
+        self.assertFalse(wal.exists())
+        backups = list(wal.parent.glob('agent.db-wal.bak.*'))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.invoke('advance', ident, '--approve-runtime', '--retry-interrupted')['phase'], 'applied')
+        self.assertEqual(json.loads(state_path.read_text())['receipts'][0]['absent_sidecars'], expected)
+        for name in ('agent.db-wal', 'agent.db-shm'):
+            path = db.with_name(name)
+            path.write_bytes(b'foreign sidecar')
+            self.assertEqual(self.invoke('verify', ident)['reason'], 'artifact_verification_failed')
+            self.assertTrue(Path(op['stage']).exists())
+            path.unlink()
+        with patch.object(IMPORT.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')):
+            self.assertEqual(self.invoke('verify', ident)['phase'], 'verified')
+
     def test_real_settings_only_apply_preserves_defaults(self):
         self.content = b'fixture instructions\n'
         self.files = [{'agent': 'codex', 'rel': 'AGENTS.md', 'sha256': hashlib.sha256(self.content).hexdigest()}]
