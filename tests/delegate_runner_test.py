@@ -3,6 +3,7 @@
 import json
 import os
 import signal
+import socket
 import subprocess
 import tempfile
 import time
@@ -740,12 +741,29 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(json.loads(p.stdout)["status"], "rate_limited")
         self.assertTrue(Path(m["workdir"]).exists())
 
-    def idle_run(self, agent=None):
+    def idle_run(self, agent=None, connected=False):
         self.count += 1
         r = self.runs / f"idle-{self.count}"
         work = r / "work"
         work.mkdir(parents=True)
-        p = subprocess.Popen(["timeout", "30", "sleep", "30"], cwd=work, env=self.env,
+        command = ["sleep", "30"]
+        if connected:
+            server = socket.socket()
+            self.addCleanup(server.close)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            command = ["python3", "-c", """
+import pathlib, socket, sys, time
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])))
+r = pathlib.Path(sys.argv[2])
+(r / "connected").touch()
+while not (r / "disconnect").exists():
+    time.sleep(0.05)
+s.close()
+(r / "disconnected").touch()
+time.sleep(30)
+""", str(server.getsockname()[1]), str(r)]
+        p = subprocess.Popen(["timeout", "30", *command], cwd=work, env=self.env,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
         def cleanup():
@@ -760,7 +778,12 @@ class RunnerTests(unittest.TestCase):
         for name in ("stdout.log", "stderr.log", "prompt.md"):
             (r / name).write_text("test\n")
             os.utime(r / name, (now - 1200, now - 1200))
-        (r / "supervise.samples").write_text(f"{now - 1200} 0 {now - 1200}\n")
+        if connected:
+            self.wait_file(r / "connected")
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        start = Path(f"/proc/{p.pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+        state = "connected" if connected else "disconnected"
+        (r / "supervise.samples").write_text(f"{now - 1200} 0 {now - 1200} {state} {boot}:{p.pid}:{start}\n")
         (r / "supervise.lastcheck").write_text(str(now))
         return r, p
 
@@ -801,6 +824,79 @@ class RunnerTests(unittest.TestCase):
                 self.assertIn("status=stalled next=return", proc.stdout)
                 self.assertIn("resumable=1", proc.stdout)
                 self.assertIsNone(p.poll())  # the bot, not the supervisor, performs recovery
+
+    def test_silent_connected_pi_omp_are_advisory_even_with_explicit_restart(self):
+        for agent in ("pi", "omp"):
+            with self.subTest(agent=agent):
+                r, p = self.idle_run(agent, connected=True)
+                for flags in ((), ("--stall-action", "restart")):
+                    proc = self.supervise(r, *flags)
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertIn("reason=waiting_on_model", proc.stdout)
+                    self.assertIn("resumable=0", proc.stdout)
+                    self.assertIn("tcp=connected", (r / "supervise.log").read_text())
+                    self.assertIsNone(p.poll())
+
+    def test_unowned_tcp_connection_does_not_hide_disconnected_idle(self):
+        self.idle_run("pi", connected=True)  # same network namespace, different process tree
+        r, _ = self.idle_run("omp")
+        proc = self.supervise(r)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("resumable=1", proc.stdout)
+        self.assertIn("tcp=disconnected", (r / "supervise.log").read_text())
+
+    def test_disconnect_needs_a_full_stall_window_before_restart(self):
+        r, _ = self.idle_run("pi", connected=True)
+        (r / "disconnect").touch()
+        self.wait_file(r / "disconnected")
+        proc = self.supervise(r)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("resumable=0", proc.stdout)
+        self.assertIn("tcp=disconnected tcp_idle=0", (r / "supervise.log").read_text())
+        # Advance the observed disconnected window without a ten-minute wall-clock sleep.
+        sample = (r / "supervise.samples").read_text().splitlines()[0].split()
+        sample[3] = "disconnected"
+        (r / "supervise.samples").write_text(" ".join(sample) + "\n")
+        proc = self.supervise(r)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("no_connection_10m", proc.stdout)
+
+    def test_legacy_and_unknown_tcp_samples_do_not_authorize_restart(self):
+        for evidence in ("", "unknown", "connected"):
+            with self.subTest(evidence=evidence):
+                r, _ = self.idle_run("pi")
+                sample = (r / "supervise.samples").read_text().split()
+                if evidence:
+                    sample[3] = evidence
+                else:
+                    sample = sample[:3]  # old supervisor format
+                (r / "supervise.samples").write_text(" ".join(sample) + "\n")
+                proc = self.supervise(r)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn("resumable=0", proc.stdout)
+
+    def test_tcp_inode_join_ipv6_and_unavailable_visibility(self):
+        proc = self.root / "proc"
+        fds, net = proc / "123/fd", proc / "123/net"
+        fds.mkdir(parents=True)
+        net.mkdir()
+        (fds / "9").symlink_to("socket:[42]")
+        def state():
+            p = subprocess.run(["python3", "-c", "import sys; sys.path.insert(0, sys.argv[1]); "
+                                "from process_activity import tcp_state; from pathlib import Path; "
+                                "print(tcp_state([123], Path(sys.argv[2])))", str(SCRIPTS), str(proc)],
+                               env=self.env, capture_output=True, text=True, check=True, timeout=5)
+            return p.stdout.strip()
+        row = "0: 00000000:0000 00000000:0000 01 0:0 0:0 0 0 0 42\n"
+        (net / "tcp").write_text("header\n" + row.replace("42", "99"))
+        (net / "tcp6").write_text("header\n")
+        self.assertEqual(state(), "disconnected")
+        (net / "tcp6").write_text("header\n" + row)
+        self.assertEqual(state(), "connected")
+        (net / "tcp6").unlink()  # IPv6 disabled; IPv4 evidence is still valid.
+        self.assertEqual(state(), "disconnected")
+        (net / "tcp").unlink()
+        self.assertEqual(state(), "unknown")
 
     def test_explicit_stall_action_overrides_each_cli_default(self):
         for agent in ("pi", "omp", "claude", "codex"):
@@ -848,7 +944,9 @@ class RunnerTests(unittest.TestCase):
 
     def test_cpu_counter_drop_is_not_evidence_of_stall(self):
         r, _ = self.idle_run()
-        (r / "supervise.samples").write_text(f"{int(time.time()) - 1200} 100000 0\n")
+        sample = (r / "supervise.samples").read_text().split()
+        sample[1] = "100000"
+        (r / "supervise.samples").write_text(" ".join(sample) + "\n")
         proc = self.supervise(r, "--stall-action", "restart")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("status=running", proc.stdout)

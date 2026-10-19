@@ -7,7 +7,7 @@
 #   --new        start a fresh budget (the first call of each new supervisor)
 #   --slice S    longest single invocation (default 600; stays under the 780 s Shell call limit)
 #   --interval S seconds between checks (default 30)
-#   --stall-min M  no log/session writes and little CPU for M minutes = suspected idle (default 10)
+#   --stall-min M  no log/session writes, TCP connection or CPU progress for M minutes (default 10)
 #   --stall-action report|restart  default: restart for pi/omp, report for claude/codex/unknown
 # Output (stdout, one line):
 #   status=running|done|failed|stalled next=continue|return run_dir=DIR reason=... idle=Ns cpu_delta=Ns forks=N remaining=Ns resumable=0|1
@@ -110,33 +110,9 @@ agent_pid() {
   done
 }
 
-# CPU seconds (x100) used so far by the agent's process tree, ignoring idle language servers below the agent.
-tree_cpu() {
-  python3 - "$1" "$TCK" "$IGNORE_RE" <<'PY'
-import os, re, sys
-root, tck, ign = int(sys.argv[1]), int(sys.argv[2]), re.compile(sys.argv[3])
-procs = {}
-for d in os.listdir("/proc"):
-    if not d.isdigit(): continue
-    try:
-        s = open(f"/proc/{d}/stat").read(); rest = s[s.rindex(")") + 2:].split()
-        cmd = open(f"/proc/{d}/cmdline", "rb").read().replace(b"\0", b" ").decode("utf-8", "replace")
-        procs[int(d)] = (int(rest[1]), int(rest[11]) + int(rest[12]), cmd)
-    except Exception: pass
-kids = {}
-for p, (pp, _, _) in procs.items(): kids.setdefault(pp, []).append(p)
-tot, busy, stack = 0, 0, [(root, 0)]
-while stack:
-    p, depth = stack.pop()
-    if p not in procs: continue
-    _, t, cmd = procs[p]
-    idle_ls = depth >= 2 and ign.search(cmd)
-    if not idle_ls:
-        tot += t
-        if depth >= 2: busy += 1
-    stack += [(k, depth + 1) for k in kids.get(p, [])]
-print(tot * 100 // tck, busy)
-PY
+# CPU seconds (x100), busy children, TCP state, and boot/PID/start identity.
+tree_activity() {
+  python3 "$(dirname "$0")/process_activity.py" "$1" "$TCK" "$IGNORE_RE"
 }
 
 out_mtime() {  # newest write among the run's logs and session files
@@ -187,22 +163,35 @@ while :; do
     elif [ $((T - $(stat -c %Y "$R/prompt.md" 2>/dev/null || echo "$T"))) -lt 60 ]; then :
     else sleep 3; [ -f "$R/meta.json" ] && continue; CPUD=-1; emit failed return died_no_meta
     fi
-    CPU=0 BUSY=0
+    CPU=0 BUSY=0 TCP=unknown PROCESS_KEY=unknown
   else
-    read -r CPU BUSY < <(tree_cpu "$P")
+    read -r CPU BUSY TCP PROCESS_KEY < <(tree_activity "$P") || { CPU=0; BUSY=0; TCP=unknown; PROCESS_KEY=unknown; }
   fi
-  [ -n "$P" ] && echo "$T $CPU $MT" >> "$SAMPLES"
-  # CPU used over the stall window: compare with the newest sample at least STALL seconds old.
-  OLD=""; [ -n "$P" ] && OLD=$(awk -v lim=$((T - STALL)) '$1 <= lim {c=$2} END {print c}' "$SAMPLES")
-  if [ -n "$OLD" ] && [ "$CPU" -ge "$OLD" ]; then CPUD=$(( (CPU - OLD) / 100 )); else CPUD=-1; fi
-  echo "$(ts) pid=${P:-none} idle=${IDLE}s cpu=$((CPU / 100))s cpu_delta=${CPUD}s busy_kids=$BUSY forks=$FORKS remaining=${REM}s" >> "$LOG"
+  [ -n "$P" ] && echo "$T $CPU $MT $TCP $PROCESS_KEY" >> "$SAMPLES"
+  # Require a full observed window for this process incarnation. Legacy samples lack
+  # TCP/identity evidence, so they cannot authorize a restart after an upgrade/reboot.
+  OLD_ROW=""; [ -n "$P" ] && OLD_ROW=$(awk -v lim=$((T - STALL)) '$1 <= lim {row=$0} END {print row}' "$SAMPLES")
+  read -r OLD_T OLD _ OLD_TCP OLD_KEY <<< "$OLD_ROW"
+  CPUD=-1 TCP_IDLE=0
+  if [ -n "$OLD" ] && [ "$PROCESS_KEY" != unknown ] && [ "$OLD_KEY" = "$PROCESS_KEY" ] && [ "$CPU" -ge "$OLD" ]; then
+    CPUD=$(( (CPU - OLD) / 100 ))
+    if [ "$OLD_TCP" = disconnected ]; then
+      TCP_IDLE=$(awk -v since="$OLD_T" -v key="$PROCESS_KEY" '$1 >= since && ($4 != "disconnected" || $5 != key) {bad=1} END {print !bad}' "$SAMPLES")
+    fi
+  fi
+  echo "$(ts) pid=${P:-none} idle=${IDLE}s cpu=$((CPU / 100))s cpu_delta=${CPUD}s busy_kids=$BUSY tcp=$TCP tcp_idle=$TCP_IDLE forks=$FORKS remaining=${REM}s" >> "$LOG"
   REASON=slice_end
-  # Pi/omp expose progress via owned session writes as well as output. Their default authorizes
-  # restart on this heuristic; Claude/Codex stay advisory. Quiet reasoning can still be misjudged.
-  # A shrinking tree CPU counter (children exited) cannot establish inactivity.
+  # Completed session messages are not heartbeats: silent model reasoning can be healthy.
+  # A live connection (even with explicit restart), missing visibility, or shrinking CPU
+  # counters cannot authorize recovery. Disconnection must last the whole stall window.
   if [ -n "$P" ] && [ "$IDLE" -ge "$STALL" ] && [ "$CPUD" -ge 0 ] && [ "$CPUD" -lt 2 ]; then
-    [ "$STALL_ACTION" = restart ] && emit stalled return "no_output_no_cpu_${STALL_MIN}m"
     REASON=idle_suspected
+    case "$TCP" in
+      connected) REASON=waiting_on_model;;
+      unknown) REASON=liveness_unknown;;
+      disconnected)
+        [ "$TCP_IDLE" = 1 ] && [ "$STALL_ACTION" = restart ] && emit stalled return "no_output_no_cpu_no_connection_${STALL_MIN}m";;
+    esac
   fi
   [ "$T" -ge "$DEADLINE" ] && emit running return budget_used
   [ $((T + INTERVAL)) -gt "$SLICE_END" ] && emit running continue "$REASON"
