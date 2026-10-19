@@ -141,6 +141,12 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(m["error_kind"], "conn_error")
             self.assertIn("Connection aborted", m["summary"])
 
+    def test_pi_like_warning_on_stop_is_not_failure(self):
+        for agent in ("pi", "omp"):
+            with self.subTest(agent=agent):
+                m = self.run_agent(agent, [message("done", "stop", "Falling back to another credential")])
+                self.assertEqual((m["status"], m["summary"], m["error_kind"]), ("ok", "done", None))
+
     def test_tool_json_cannot_spoof_completion(self):
         for agent in ("pi", "omp"):
             m = self.run_agent(agent, [{"type": "message_end", "message": {"role": "toolResult", "content": [message()]}}])

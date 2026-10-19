@@ -97,7 +97,9 @@ for ev in events(raw):
             # Replace even an empty answer: an earlier failed attempt must not leak into success.
             content = msg.get("content")
             result = "\n".join(c["text"] for c in content if isinstance(c, dict) and c.get("type") == "text" and isinstance(c.get("text"), str)) if isinstance(content, list) else ""
-            failure = str(msg.get("errorMessage") or last_stop or "unknown error") if last_stop in ("error", "aborted") or msg.get("errorMessage") else ""
+            # Upstream pi/omp print modes fail only on stopReason error/aborted; an errorMessage on a
+            # "stop" message is a non-fatal warning (omp prints it to stderr and exits 0).
+            failure = str(msg.get("errorMessage") or last_stop) if last_stop in ("error", "aborted") else ""
             if last_stop == "length" and not failure:
                 failure = "Response truncated: model output token limit (length)"
             terminal = bool(failure) or last_stop == "stop"
