@@ -142,6 +142,7 @@ fi
 # shellcheck source=worktree_guard.sh
 source "$(dirname "$0")/worktree_guard.sh"
 guard_workdir "$WORKDIR" || exit $?
+[ "$RESUME_IN_PLACE" = 0 ] || [ -n "${GBA_RESTART_ROOT:-}" ] || die "resume_requires_recovery"
 
 for d in "${INPUTS[@]}"; do EXTRA+=("$(cd "$(dirname "$d")" && pwd)/$(basename "$d")"); done
 ADD_DIRS=()   # --add-dir for claude/codex/omp (pi: paths are listed in the prompt instead)
@@ -243,6 +244,11 @@ printf '%s\n' "$WORKDIR" > "$RUN_DIR/workdir.path"
 START_HEAD=""
 [ "$KIND" = repo ] && START_HEAD=$(git -C "$WORKDIR" rev-parse HEAD)
 START=$(date +%s)
+# Private, structured launch inputs survive config changes and truncated logs.
+# A restart must match a reservation made by resume-run.sh; the CLI process must
+# not inherit that internal handoff capability.
+python3 "$(dirname "$0")/run_lifecycle.py" record-launch "$RUN_DIR" "$TIMEOUT" "$AGENT" "$MODEL" "$REASONING" "$PERM" "$CWD" "$PROMPT_FILE" "${INPUTS[@]}" \
+  >/dev/null 2>&1 || die "lifecycle_unavailable"
 # Persist before launch: startup/auth/transport failure may emit no session event at all.
 if [ -n "$RESUME" ]; then
   python3 -c 'import json,sys; print(json.dumps({"agent":sys.argv[1],"session":sys.argv[2]}))' \
@@ -250,7 +256,7 @@ if [ -n "$RESUME" ]; then
 fi
 # agent.pid / runner.pid let supervise.sh find the process tree (stall checks, restart after a VM pause).
 # Only the resume/runner handoff may reuse ownership; nested agent commands must contend.
-( cd "$WORKDIR" && unset DELEGATE_LOCK_WORKDIR && exec timeout --kill-after=30 "$TIMEOUT" "${CMD[@]}" ) >"$RUN_DIR/stdout.log" 2>>"$RUN_DIR/stderr.log" </dev/null &
+( cd "$WORKDIR" && unset DELEGATE_LOCK_WORKDIR GBA_RESTART_ROOT && exec timeout --kill-after=30 "$TIMEOUT" "${CMD[@]}" ) >"$RUN_DIR/stdout.log" 2>>"$RUN_DIR/stderr.log" </dev/null &
 AGENT_PID=$!
 echo "$AGENT_PID" > "$RUN_DIR/agent.pid"; echo "$$" > "$RUN_DIR/runner.pid"
 wait "$AGENT_PID"

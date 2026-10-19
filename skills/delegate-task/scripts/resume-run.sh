@@ -4,19 +4,21 @@
 # with a continuation brief. Start this script itself as the background Shell command; it ends in
 # run-agent.sh and prints the same JSON summary.
 # Usage:
-#   resume-run.sh RUN_ID|RUN_DIR [--native] [--new-id ID] [--kill] [--dry-run] [-- run-agent.sh overrides...]
+#   resume-run.sh RUN_ID|RUN_DIR [--native] [--new-id ID] [--kill] [--dry-run] [--allow-extra-restart] [-- overrides...]
 #   --native   opt in to the CLI session in the SAME workdir; fresh-session fallback on missing/rejected resume
 #   --kill     stop the old process tree if it is still alive (required for a stalled, not dead, run)
 #   --new-id   id of the new run (default <id>-r2, -r3, ...)
 #   --dry-run  do the checks, print the plan and the run-agent.sh command; change nothing
+#   --allow-extra-restart  explicit USER-approved attempt beyond TWO lineage restarts
 # Agent, model and reasoning are taken from the old run's meta.json or cmd.txt; overrides after -- win.
 set -uo pipefail
 umask 077
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ARG="" NEW_ID="" KILL=0 DRY=0 NATIVE=0 EXTRA=()
+ARG="" NEW_ID="" KILL=0 DRY=0 NATIVE=0 ALLOW_EXTRA=0 EXTRA=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --new-id) NEW_ID="$2"; shift 2;;
+    --new-id) [ $# -ge 2 ] || exit 64; NEW_ID="$2"; shift 2;;
+    --allow-extra-restart) ALLOW_EXTRA=1; shift;;
     --kill) KILL=1; shift;;
     --native) NATIVE=1; shift;;
     --dry-run) DRY=1; shift;;
@@ -44,14 +46,11 @@ if [ -f "$R/meta.json" ] && python3 -c 'import json,sys; sys.exit(json.load(open
   die "run $OLD_ID already finished ok; continue it with --resume <session_id> instead"
 fi
 
-# Validate the destination before killing processes or checkpointing work.
-if [ -z "$NEW_ID" ]; then
-  base="${OLD_ID%-r[0-9]*}"; n=2
-  while [ -e "$ROOT/$base-r$n" ]; do n=$((n + 1)); done
-  NEW_ID="$base-r$n"
-fi
-case "$NEW_ID" in [!a-zA-Z0-9]*|*[!a-zA-Z0-9._-]*) die "invalid new run id";; esac
-[ -e "$ROOT/$NEW_ID" ] && die "run dir already exists: $ROOT/$NEW_ID"
+# Read-only planning checks the whole lineage, even when the original ID is reused.
+# A second check under the ledger lock below closes races before any checkpoint.
+PLAN=$(python3 "$HERE/run_lifecycle.py" plan "$R" "$NEW_ID" "$ALLOW_EXTRA"); RC=$?
+[ "$RC" = 0 ] || { printf '%s\n' "$PLAN"; exit "$RC"; }
+NEW_ID=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "$PLAN")
 # Native recovery must not switch agent, workdir, session, run id or brief through overrides.
 if [ "$NATIVE" = 1 ]; then
   i=0
@@ -87,10 +86,29 @@ eval "$(python3 - "$R" "$HERE" "$OLD_WORKDIR" <<'PY'
 import json, os, shlex, sys
 sys.path.insert(0, sys.argv[2])
 from session_state import session_info
-r = sys.argv[1]; out = {"AGENT": "", "MODEL": "", "REASONING": "", "PERMISSION": ""}
+r = sys.argv[1]; out = {"AGENT": "", "MODEL": "", "REASONING": "", "PERMISSION": "", "TIMEOUT": "1800"}
+inputs = []
+try:
+    launch = json.load(open(os.path.join(r, "launch.json")))
+    for key in ("AGENT", "MODEL", "REASONING", "PERMISSION"):
+        value = launch.get(key.lower())
+        if isinstance(value, str):
+            out[key] = value
+    timeout = launch.get("timeout_sec")
+    if type(timeout) is int and timeout > 0:
+        out["TIMEOUT"] = str(timeout)
+    inputs = launch.get("inputs") or []
+    if not isinstance(inputs, list) or any(not isinstance(p, str) for p in inputs):
+        inputs = []
+    # A non-repo cwd was an extra readable input, not the isolated workdir.
+    cwd = launch.get("cwd")
+    if isinstance(cwd, str) and cwd and cwd != sys.argv[3] and cwd not in inputs:
+        inputs.append(cwd)
+except Exception:
+    pass
 try:
     m = json.load(open(os.path.join(r, "meta.json")))
-    out.update(AGENT=m.get("agent") or "", MODEL=m.get("model") or "", REASONING=m.get("reasoning") or "", PERMISSION=m.get("permission") or "")
+    out.update(AGENT=m.get("agent") or out["AGENT"], MODEL=m.get("model") or out["MODEL"], REASONING=m.get("reasoning") or out["REASONING"], PERMISSION=m.get("permission") or out["PERMISSION"])
 except Exception:
     pass
 try:
@@ -117,9 +135,19 @@ out["PERMISSION"] = out["PERMISSION"] or "safe"
 session = session_info(out["AGENT"], r, sys.argv[3])
 out.update(SESSION_ID=session["session_id"] or "", SESSION_FILE=session["session_file"] or "")
 print("\n".join(f"{k}={shlex.quote(v)}" for k, v in out.items()))
+print("ORIGINAL_INPUTS=(" + " ".join(shlex.quote(p) for p in inputs) + ")")
 PY
 )"
 [ -n "$AGENT" ] || die "cannot tell which agent ran $OLD_ID; pass -- --agent NAME"
+
+# Reserve only after ownership checks succeed. Reservations are never recycled:
+# startup failures and native-rejection fallbacks are real restart attempts too.
+if [ "$DRY" = 0 ]; then
+  PLAN=$(python3 "$HERE/run_lifecycle.py" reserve "$R" "$NEW_ID" "$ALLOW_EXTRA"); RC=$?
+  [ "$RC" = 0 ] || { printf '%s\n' "$PLAN"; exit "$RC"; }
+fi
+GBA_RESTART_ROOT=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["root_id"])' "$PLAN")
+export GBA_RESTART_ROOT
 
 # --- commit work in progress ---
 SRC_CWD="" KIND=work
@@ -164,6 +192,8 @@ CMD=(bash "$HERE/run-agent.sh" --agent "$AGENT" --id "$NEW_ID" --prompt-file "$B
 [ -n "$SRC_CWD" ] && CMD+=(--cwd "$SRC_CWD")
 [ -n "$MODEL" ] && CMD+=(--model "$MODEL")
 [ -n "$REASONING" ] && CMD+=(--reasoning "$REASONING")
+CMD+=(--timeout "$TIMEOUT")
+for input in "${ORIGINAL_INPUTS[@]}"; do CMD+=(--input "$input"); done
 if [ "$PERMISSION" = read-only ]; then CMD+=(--read-only); else CMD+=(--permission "$PERMISSION"); fi
 CMD+=("${EXTRA[@]}")
 [ "$NATIVE" = 1 ] && CMD+=(--resume "$SESSION" --resume-in-place)
@@ -187,6 +217,8 @@ sys.exit(0 if resume_rejected(sys.argv[2]) else 1)
 PY
   then
     echo "CLI rejected native resume before doing work; falling back to fresh-session resume in a new workdir (attempt logs: $ROOT/$NEW_ID)" >&2
+    # Approval applies to this requested extra attempt only, not an unbounded
+    # automatic fallback after it. The fallback must pass the same cap again.
     exec bash "$HERE/resume-run.sh" "$ROOT/$NEW_ID" -- "${EXTRA[@]}"
   fi
   printf '%s\n' "$SUMMARY"; exit "$RC"
