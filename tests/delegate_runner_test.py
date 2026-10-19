@@ -27,7 +27,12 @@ if os.environ.get("FAKE_SESSION_ID") and "--session-dir" in sys.argv:
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / ("timestamp_" + os.environ["FAKE_SESSION_ID"] + ".jsonl")
     if not path.exists():
-        path.write_text(json.dumps({"type": "session", "id": os.environ["FAKE_SESSION_ID"], "cwd": os.getcwd()}) + "\n")
+        records = [{"type": "session", "id": os.environ["FAKE_SESSION_ID"], "cwd": os.getcwd()}]
+        if pathlib.Path(sys.argv[0]).name == "omp":
+            # Synthetic title/header fixture: only the real record types/keys were inspected.
+            records = [json.loads(line) for line in pathlib.Path(os.environ["FAKE_OMP_FIXTURE"]).read_text().splitlines()]
+            records[1].update(id=os.environ["FAKE_SESSION_ID"], cwd=os.getcwd())
+        path.write_text("".join(json.dumps(record) + "\n" for record in records))
 if os.environ.get("FAKE_TOUCH"):
     pathlib.Path("saved.txt").write_text("keep this work")
 if os.environ.get("FAKE_COMMIT"):
@@ -66,6 +71,7 @@ class RunnerTests(unittest.TestCase):
         self.env = {"HOME": str(home), "PATH": f"{bin_dir}:/usr/bin:/bin", "LANG": "C.UTF-8",
                     "AGENT_RUNS_ROOT": str(self.runs), "FAKE_ARGS": str(self.root / "args.json"),
                     "FAKE_OUTPUT": str(self.root / "events.jsonl"),
+                    "FAKE_OMP_FIXTURE": str(Path(__file__).resolve().parent / "fixtures/omp-title-session.jsonl"),
                     "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}
         self.count = 0
 
@@ -396,6 +402,25 @@ class RunnerTests(unittest.TestCase):
                     self.assertIn("-o", args)
                     self.assertIn('sandbox_mode="workspace-write"', args)
                     self.assertEqual(args[-2], m["session_id"])
+
+    def test_omp_header_discovery_is_bounded_and_skips_non_header_records(self):
+        m = self.native_run("omp")
+        r, session = Path(m["run_dir"]), Path(m["session_file"])
+        records = session.read_text().splitlines()
+        self.assertEqual([json.loads(line)["type"] for line in records], ["title", "session"])
+        (r / "stdout.log").write_text("truncated\n")
+        (r / "meta.json").unlink()
+        # Non-object records and malformed noise must not hide a nearby header.
+        session.write_text("null\n{broken\n" + "\n".join(records) + "\n")
+        p = self.command("resume-run.sh", r, "--native", "--dry-run")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("--resume-in-place", p.stdout)
+        # Do not search an arbitrary transcript for a header-shaped message.
+        session.write_text((records[0] + "\n") * 32 + records[1] + "\n")
+        p = self.command("resume-run.sh", r, "--native", "--dry-run")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertNotIn("--resume-in-place", p.stdout)
+        self.assertIn("missing session id, owned session file or workdir", p.stderr)
 
     def test_native_read_only_permissions_remain_restricted(self):
         for agent, expected in (("pi", "--tools"), ("omp", "--tools"),

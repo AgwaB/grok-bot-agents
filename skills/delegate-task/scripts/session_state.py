@@ -1,6 +1,7 @@
 """Read only run-owned session evidence; never search a user's global CLI homes."""
 import json
 import re
+from itertools import islice
 from pathlib import Path
 
 
@@ -29,6 +30,16 @@ def read_text(path):
         return ""
 
 
+def session_header(path):
+    """omp can prepend a title; bound discovery without loading message bodies."""
+    with path.open(encoding="utf-8", errors="replace") as f:
+        for line in islice(f, 32):
+            for record in events(line):
+                if record.get("type") == "session":
+                    return record
+    return {}
+
+
 def session_info(agent, run_dir, workdir):
     """Recover IDs even without terminal meta; Pi/omp also need an owned session file."""
     r = Path(run_dir)
@@ -55,8 +66,7 @@ def session_info(agent, run_dir, workdir):
     if agent in ("pi", "omp"):
         for path in sorted((r / "sessions").glob("*.jsonl")):
             try:
-                with path.open(encoding="utf-8") as f:
-                    header = json.loads(f.readline())
+                header = session_header(path)
                 if (header.get("type") == "session" and isinstance(header.get("id"), str)
                         and header["id"] and (not session or header["id"] == session)
                         and Path(header["cwd"]).resolve() == Path(workdir).resolve()):
