@@ -86,6 +86,33 @@ class ImportController(unittest.TestCase):
         self.inventory.write_text(json.dumps(response))
         self.assertEqual(self.plan()['phase'], 'awaiting_transfer')
 
+    def test_claude_global_inventory_honors_config_dir_without_default_fallback(self):
+        default = self.home / '.claude.json'
+        override = self.home / 'claude profile/.claude.json'
+        override.parent.mkdir()
+        default.write_text('{"mcpServers":{},"oauthAccount":{"id":"sk-unticked-canary"}}')
+        override.write_text('{"mcpServers":{"profile":{}},"oauthAccount":{"id":"sk-secret-canary"}}')
+        for config_dir, expected in ((None, default), ('', default), (str(override.parent), override)):
+            with self.subTest(config_dir=config_dir):
+                if config_dir is None:
+                    os.environ.pop('CLAUDE_CONFIG_DIR', None)
+                else:
+                    os.environ['CLAUDE_CONFIG_DIR'] = config_dir
+                before = {str(p): (p.stat().st_mtime_ns, p.stat().st_mode) for p in self.home.rglob('*')}
+                response = self.invoke('inventory', '--agents', 'claude')
+                self.assertEqual(len(response['files']), 1)
+                row = response['files'][0]
+                self.assertEqual((row['rel'], row['source']), ('_home/.claude.json', str(expected)))
+                self.assertEqual(row['sha256'], IMPORT.digest_file(expected))
+                self.assertEqual(before, {str(p): (p.stat().st_mtime_ns, p.stat().st_mode) for p in self.home.rglob('*')})
+                self.inventory.write_text(json.dumps(response))
+                self.selection.write_text(json.dumps(['claude:_home/.claude.json']))
+                operation = self.plan()
+                self.assertEqual(operation['transfers'][0]['source'], str(expected))
+        override.unlink()
+        self.assertEqual(self.invoke('inventory', '--agents', 'claude')['files'], [])
+        self.assertTrue(default.is_file())
+
     def test_source_must_match_allowlisted_path(self):
         for source in ('/etc/passwd', '/Users/alice/.ssh/auth.json', '/Users/alice/.pi/../auth.json'):
             self.files[0]['source'] = source

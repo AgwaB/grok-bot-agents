@@ -414,7 +414,7 @@ def inventory_files(args, plan, guard):
             if pattern == '_home/':
                 continue
             if pattern == '../.claude.json':
-                candidates.add((home / '.claude.json', '_home/.claude.json'))
+                candidates.add((destination(agent, '_home/.claude.json', plan), '_home/.claude.json'))
                 continue
             for candidate in base.glob(pattern.rstrip('/')):
                 if candidate.is_dir():
