@@ -280,8 +280,7 @@ Observation gaps and detected VM wakes reset its grace window; they do not exten
   for one user on one host; they do not sandbox arbitrary writers or provide distributed locking.
 - Runner supervision requires the Linux box's `/proc`, GNU `timeout`/utilities, Bash and Python; native
   macOS/Windows supervision is not certified. Worktrees do not isolate credentials or shared services.
-  See [source-backed runner research](../../docs/research/agent-runners.md) and
-  [validation](../../TESTING.md); native resume uses CLI flags, not transcript rewriting or a proxy.
+  See [validation](../../TESTING.md); native resume uses CLI flags, not transcript rewriting or a proxy.
 
 ## Always ask first
 Full auto covers what happens **inside** the run. These still need the user's OK every time:

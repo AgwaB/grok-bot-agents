@@ -22,7 +22,7 @@ First release.
   paths/internal investigation notes while retaining findings and source citations.
 
 - Delegate runner hardening (still **0.1.0**), informed by
-  [source-backed OSS runner research](docs/research/agent-runners.md):
+  research into existing open-source agent runners:
   - Parse Claude streamed results, Codex terminal failures, and Pi/omp final stop reasons;
     preserve actual exit codes, reject missing/truncated completion, classify transport errors
     without mistaking partial output or old retry diagnostics for the final error.

@@ -5,7 +5,7 @@ English: [README.md](README.md)
 Grok Bot 박스(클라우드 컴퓨터)에서 **Claude Code · Codex CLI · Pi · omp(Oh My Pi)** 를 설치하고 로그인하는 스킬 전용 플러그인입니다.
 가벼운 일은 Grok Bot이 직접 하고, **무거운 일은 코딩이든 아니든 CLI에 맡깁니다**. 리서치·분석, 데이터·파일 처리, 대량 변환, 긴 초안이나 번역, 로그 분석, 장시간 작업이 모두 해당됩니다.
 맡기는 방식은 두 가지입니다. **직접 지목**("codex한테 시켜")하거나 Grok Bot이 **자동 라우팅**하게 둡니다.
-실행은 헤드리스로 하고, 결과는 요약과 산출물 경로로 받아요. UX 흐름은 `docs/ux-flow.html` (PNG: `docs/ux-flow.png`)에 정리했습니다.
+실행은 헤드리스로 하고, 결과는 요약과 산출물 경로로 받아요.
 
 ## 흐름
 
@@ -25,7 +25,6 @@ Grok Bot 박스(클라우드 컴퓨터)에서 **Claude Code · Codex CLI · Pi �
 grok-bot-agents/
 ├── .cursor-plugin/plugin.json
 ├── assets/logo.svg, logo.png
-├── docs/ux-flow.html, ux-flow.png
 └── skills/
     ├── setup-agents/SKILL.md
     ├── import-agents/

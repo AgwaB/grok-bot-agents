@@ -77,7 +77,6 @@ filesystem locks and macOS/Windows supervision remain untested. Unavailable owne
 fails closed; safe `--kill` needs Linux/Python pidfd support (otherwise stop owners manually).
 Unavailable TCP evidence cannot authorize a stall restart. TCP is a heuristic, not provider health
 proof; non-TCP waits can still be misjudged and stale sockets can delay recovery.
-See [research and decisions](docs/research/agent-runners.md).
 
 ### Bounded live native-resume check (Linux, 2026-10-19)
 
@@ -145,8 +144,7 @@ The baseline WIP had 50 Python tests (48 passed, one failure, one PowerShell ski
 The failing fresh-home verification case is fixed; ten further tests cover runtime
 packages/plugins, metadata/overlay/SQLite symlinks, identical-auth verification and
 preservation of central config.
-See [the 64-case matrix](tests/MATRIX.md) for method-level traceability and
-[research on eight projects](docs/research/importers.md) for the preceding evidence.
+See [the 64-case matrix](tests/MATRIX.md) for method-level traceability.
 Counts above are test methods/checks, not 64 native-platform certifications.
 
 ### Coverage and explicit limits

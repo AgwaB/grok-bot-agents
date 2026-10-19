@@ -7,3 +7,4 @@ __pycache__/
 .agent-keys
 bridge.env
 *.tgz
+docs/

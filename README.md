@@ -11,7 +11,7 @@ analysis, long or unattended jobs. You can name the CLI ("have codex fix this") 
 by cost and difficulty. Runs are headless and isolated, and come back as a short summary plus
 artifact paths.
 
-한국어: [README.ko.md](README.ko.md) · UX walkthrough: [`docs/ux-flow.html`](docs/ux-flow.html) ([PNG](docs/ux-flow.png))
+한국어: [README.ko.md](README.ko.md)
 
 ## Skills
 
@@ -139,7 +139,6 @@ setup-tailscale.sh --uninstall [--purge] [--dry-run]
 ```
 .cursor-plugin/plugin.json
 assets/logo.svg, logo.png
-docs/ux-flow.html, ux-flow.png
 skills/
   setup-agents/SKILL.md
   import-agents/       SKILL.md, scripts/{import_plan.py, detect_local.sh, bundle_local.sh, stage_tar.py, apply_import.sh}

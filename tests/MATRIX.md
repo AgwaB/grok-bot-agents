@@ -1,7 +1,6 @@
 # Import regression matrix
 
-Scope: the public v0.1.0 importer, not a particular workstation. Research:
-[eight projects and opened sources](../docs/research/importers.md). No real logins,
+Scope: the public v0.1.0 importer, not a particular workstation. No real logins,
 provider requests, global installs, or real home directories are used by tests.
 
 ## Contract and execution
