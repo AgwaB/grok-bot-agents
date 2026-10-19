@@ -32,6 +32,59 @@ class CLIContracts(unittest.TestCase):
         self.assertEqual(result['action_owner'], 'bot' if result['next_action'] else None)
         return result
 
+    def fake_diagnostics_tools(self):
+        directory = self.home / 'fakebin'
+        directory.mkdir()
+        for name in ('claude', 'codex', 'pi', 'omp', 'node', 'npm', 'bun', 'bash'):
+            path = directory / name
+            path.write_text('#!/usr/bin/python3\nimport os, pathlib, sys\n'
+                            'with (pathlib.Path(os.environ["HOME"]) / "executed-tools").open("a") as log: '
+                            'log.write(' + repr(name) + ' + " " + " ".join(sys.argv[1:]) + "\\n")\n'
+                            'print("1.2.3")\n')
+            path.chmod(0o755)
+        self.env['PATH'] = str(directory)
+        config = self.home / '.grok-bot-agents/config.json'
+        config.parent.mkdir()
+        config.write_text(json.dumps({'version': 1, 'enabled': ['codex'], 'timeout_sec': 1800,
+                                      'runs_dir': str(self.home / 'runs'), 'permission_mode': 'safe',
+                                      'worktree_per_task': True, 'routing': {'mode': 'ask'},
+                                      'agents': {'codex': {'auth': 'api_key', 'key_env': 'OPENAI_API_KEY'}}}))
+        (self.home / '.agent-keys').write_text('export OPENAI_API_KEY=' + CANARY + '\n')
+
+    def test_static_doctor_and_verify_write_neither_home_nor_plugin_bytecode(self):
+        plugin = self.home / 'plugin'
+        shutil.copytree(ROOT / 'scripts', plugin / 'scripts', ignore=shutil.ignore_patterns('__pycache__'))
+        shutil.copytree(ROOT / 'skills', plugin / 'skills', ignore=shutil.ignore_patterns('__pycache__'))
+        self.fake_diagnostics_tools()
+
+        def snapshot():
+            return {str(p): (p.stat().st_mtime_ns, p.read_bytes() if p.is_file() else None)
+                    for p in self.home.rglob('*')}
+
+        before = snapshot()
+        for args in (('doctor', '--json'), ('verify', '--agents', 'codex')):
+            with self.subTest(args=args):
+                result = self.invoke(*args, entry=plugin / 'scripts/gba')
+                self.assertEqual(result['status'], 'ok', result)
+                self.assertEqual(result['agents']['codex']['version_status'], 'not_requested')
+                self.assertFalse(result['version_probes']['requested'])
+                self.assertEqual(before, snapshot())
+        self.assertFalse((self.home / 'executed-tools').exists())
+        self.assertFalse(list(plugin.rglob('__pycache__')))
+
+    def test_version_probe_flag_is_explicit_for_doctor_and_verify(self):
+        self.fake_diagnostics_tools()
+        for index, args in enumerate((('doctor', '--json', '--probe-versions'),
+                                      ('verify', '--agents', 'codex', '--probe-versions')), 1):
+            with self.subTest(args=args):
+                result = self.invoke(*args)
+                self.assertEqual(result['status'], 'ok', result)
+                self.assertTrue(result['version_probes']['requested'])
+                self.assertEqual(result['agents']['codex']['version'], '1.2.3')
+                self.assertEqual((self.home / 'executed-tools').read_text(),
+                                 'codex --version\nnode --version\nnpm --version\nbun --version\n' * index)
+                self.assertFalse(result['live']['requested'])
+
     def test_all_command_families_and_unrelated_cwd(self):
         for args in (('setup', 'plan', '--agents', 'pi'), ('import', 'status', 'missing'),
                      ('runs', 'list', '--open', '--json'), ('runs', 'next', 'missing'),

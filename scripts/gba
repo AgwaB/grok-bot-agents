@@ -2,7 +2,7 @@
 """Thin JSON entrypoint. Python 3.11+; no third-party dependencies."""
 import sys
 
-# Even setup plan/help must not create __pycache__ beside an installed skill.
+# Static plan/doctor/verify/help must not create bytecode beside installed skills.
 sys.dont_write_bytecode = True
 
 import argparse

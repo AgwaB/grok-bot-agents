@@ -10,7 +10,8 @@ From this SKILL.md's absolute folder, resolve the complete plugin at `../..` and
 all plugin scripts/helpers; stop if missing. Never resolve relative to an arbitrary Shell cwd.
 The config helper is `<root>/skills/configure-agents/scripts/agents_config.py` (**CFG** below).
 
-Start with `gba doctor --json`; shared `~/.grok-bot-agents/config.json` changes affect the next run.
+Start with `gba doctor --json` (static: no CLI execution or writes).
+Shared `~/.grok-bot-agents/config.json` changes affect the next run.
 `python3 <CFG> show` gives native/override preferences; never inspect raw auth/config files for diagnosis.
 
 ## Central settings (no secret values)
@@ -51,6 +52,8 @@ omp `~/.omp/agent/config.yml` / `models.yml`. Honor the CLI directory overrides.
 Central non-native model/reasoning wins over these files. Settings-only imports preserve central overrides;
 never silently clear one or claim imported defaults automatically apply.
 
-After a change run `gba verify --agents <changed-agents>` offline. With explicit provider-use permission,
-add `--live` for an exact-OK check; report auth/quota/failure separately. Do not dump CLI diagnostics,
-auth files, agent.db, secrets.env, ~/.agent-keys or sensitive native configuration.
+After a change run `gba verify --agents <changed-agents>` statically; versions default to `null`/`not_requested`.
+Runtime-use approval is required for `--probe-versions` (execution may write files or use the network).
+With explicit provider-use permission add `--live` for an exact-OK check; it does not enable version probes.
+Both execution paths check managed wrapper/payload integrity first. Report auth/quota/failure separately.
+Do not dump CLI diagnostics, auth files, agent.db, secrets.env, ~/.agent-keys or sensitive native configuration.

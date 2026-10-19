@@ -16,7 +16,8 @@ for the bot, not executable payloads. See [CLI contract](../../README.md#gba-cli
 
 ## Choose, plan, install
 
-1. Run `gba doctor --json` on the box. If already configured, ask whether to add or reconfigure.
+1. Run `gba doctor --json` on the box (static: no CLI execution or writes).
+   If already configured, ask whether to add or reconfigure.
 2. `ListMachines`: choose a connected desktop (macOS/Linux/Windows), not a phone.
    Run the import skill's `detect_local.sh` there; Windows uses `detect_local.ps1`.
    Detection reads config/auth contents internally but **emits names, never values**.
@@ -60,6 +61,8 @@ Explain any existing override and ask before clearing it; never promise imported
 Full-auto is the existing default: unrestricted shell/network/login access. Worktrees are not a sandbox;
 external actions still need approval. Offer safe mode, and note Pi has no approval system.
 
-Run `gba verify --agents <selected>` offline. With explicit permission for provider use, add `--live`
-for the exact-OK check. Quota exhaustion is not a successful OK test. Fix a bounded cause and retry once
-only with approval; never change a model silently. Report per-agent status and remaining bot actions.
+Run `gba verify --agents <selected>` statically; versions remain `null`/`not_requested` by default.
+Only after runtime-use approval add `--probe-versions` (CLI/runtime execution may write files or use the network).
+With explicit permission for provider use, add `--live` for the exact-OK check; it does not enable version probes.
+Managed wrapper/payload integrity must pass before either execution. Quota exhaustion is not a successful OK test.
+Fix a bounded cause and retry once only with approval; never change a model silently. Report status and remaining bot actions.

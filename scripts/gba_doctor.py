@@ -1,15 +1,21 @@
-"""Sanitized offline diagnostics and an explicitly gated live OK verification.
+"""Static diagnostics, opt-in version probes, and opt-in live OK verification.
 
-No raw config, CLI output, helper errors, auth data, or live transcripts are
-returned. The existing parity/runner helpers retain their ownership guards.
+Default doctor/verify never start processes or write files. Version probes may
+have CLI side effects and require --probe-versions; provider calls require --live.
+No raw config, CLI output, helper errors, auth data, or transcripts are returned.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import re
+import runpy
+import sqlite3
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import gba_setup as setup
 
@@ -52,30 +58,75 @@ def _key_presence(names):
     return {n: n in present for n in names}, readable
 
 
-def _offline_env(names):
-    env = setup.clean_env()
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
-    # Parity only needs the presence of env names. Do not forward their values.
-    for name in names:
-        if os.environ.get(name):
-            env[name] = "present"
-    for name in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "PI_CODING_AGENT_DIR"):
-        if os.environ.get(name):
-            env[name] = os.environ[name]
-    return env
+def _omp_auth(helper, names):
+    # The legacy omp auth check copies the DB to a temporary directory. Reuse
+    # its config-reference check without that writing branch, then inspect only
+    # a stable DB with SQLite's immutable, read-only mode (no locks/sidecars).
+    directory = setup.home() / ".omp/agent"
+    gaps = []
+    models = directory / "models.yml"
+    text = models.read_text(encoding="utf-8") if models.is_file() else ""
+    stack = []
+    for line in text.splitlines():
+        match = re.match(r"^(\s*)([\"']?)([A-Za-z0-9_.@-]+)\2\s*:\s*(.*)$", line)
+        if not match:
+            continue
+        indent = len(match.group(1))
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        path = [key for _, key in stack]
+        if match.group(3) == "apiKey" and len(path) == 2 and path[0] == "providers":
+            value = re.sub(r"\s+#.*$", "", match.group(4)).strip().strip("\"'")
+            gaps += helper["ref_gaps"](value, "omp models.yml", names)
+        stack.append((indent, match.group(3)))
+    db = directory / "agent.db"
+    if db.is_file():
+        wal = directory / "agent.db-wal"
+        if wal.exists() and wal.stat().st_size:
+            # immutable mode ignores WAL; never report stale auth as verified.
+            gaps.append({"impact": "degraded", "item": "omp auth", "detail": "WAL auth status not checked"})
+        else:
+            connection = sqlite3.connect(db.as_uri() + "?mode=ro&immutable=1", uri=True)
+            try:
+                rows = connection.execute("select provider, disabled_cause is null from auth_credentials").fetchall()
+            finally:
+                connection.close()
+            enabled = {row[0] for row in rows if row[1]}
+            for _provider in {row[0] for row in rows} - enabled:
+                gaps.append({"impact": "degraded", "item": "omp auth", "detail": "disabled login"})
+            for provider in enabled:
+                if re.search(r"anthropic|claude", provider, re.I):
+                    gaps.append({"impact": "cosmetic", "item": "omp auth", "detail": "subscription OAuth ToS risk"})
+    return gaps
 
 
-def _parity(root, selected, names):
+def _static_parity_helper(script):
+    # Load the trusted bundled helper in-process, suppressing import bytecode.
+    # Its --no-run checks are static except for the legacy omp DB-copy branch.
+    old_path, old_bytecode = sys.path[:], sys.dont_write_bytecode
+    try:
+        sys.path.insert(0, str(script.parent))
+        sys.dont_write_bytecode = True
+        helper = runpy.run_path(str(script), run_name="gba_static_parity")["check"].__globals__
+        helper["HOME"] = str(setup.home())
+        helper["shutil"] = SimpleNamespace(which=setup.find_executable)
+        helper["auth_omp"] = lambda names: _omp_auth(helper, names)
+        return helper
+    finally:
+        sys.path[:] = old_path
+        sys.dont_write_bytecode = old_bytecode
+
+
+def _parity(root, selected):
     script = root / "skills/import-agents/scripts/parity_check.py"
     if not script.is_file():
         return {"status": "blocked", "reason": "parity_helper_missing", "agents": {}}
-    rc, out, _, code = setup.run_captured(
-        [sys.executable, str(script), "--cli", ",".join(selected), "--no-run"],
-        timeout=30, env=_offline_env(names), cwd=root)
-    if code != "ok" or rc not in (0, 1):
-        return {"status": "blocked", "reason": "parity_check_failed", "agents": {}}
     try:
-        payload = json.loads(out)
+        # Legacy readers can emit warnings containing private paths. Preserve
+        # the previous captured-output boundary without starting a subprocess.
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            helper = _static_parity_helper(script)
+            payload = {agent: helper["check"](agent, no_run=True) for agent in selected}
         agents = {}
         for agent in selected:
             entry = payload[agent]
@@ -91,8 +142,6 @@ def _parity(root, selected, names):
                     counts[gap["impact"]] += 1
             agents[agent] = {"ok": entry["ok"] and counts["breaking"] == 0, "counts": counts}
         ok = all(entry["ok"] for entry in agents.values())
-        if rc != 0 and ok:
-            return {"status": "blocked", "reason": "parity_check_failed", "agents": agents}
         return {"status": "ok" if ok else "blocked", "reason": "parity_ok" if ok else "parity_gaps",
                 "agents": agents}
     except Exception:
@@ -110,7 +159,33 @@ def _auth_presence():
     return {a: p.is_file() for a, p in paths.items()}
 
 
-def offline(root, selected=None):
+def _managed_integrity(agent):
+    try:
+        if setup.managed_state(agent):
+            return True, "ok"
+        # An incomplete managed install must not become an external executable
+        # just because its receipt disappeared.
+        if (setup.base_dir() / "agents" / agent).exists():
+            return True, "managed_install_invalid"
+        wrapper = setup.home() / ".local/bin" / agent
+        if wrapper.is_file():
+            with wrapper.open("rb") as stream:
+                if b"# gba-managed-v1 " in stream.read(256):
+                    return True, "managed_install_invalid"
+        return False, "not_managed"
+    except (setup.SetupError, OSError):
+        return True, "managed_install_invalid"
+
+
+def _version(executable, requested, integrity="not_managed"):
+    if not requested:
+        return {"status": "not_requested", "version": None}
+    if integrity == "managed_install_invalid":
+        return {"status": integrity, "version": None}
+    return setup.probe_version(executable)
+
+
+def offline(root, selected=None, probe_versions=False):
     config_state = "ok"
     cfg = None
     try:
@@ -126,14 +201,9 @@ def offline(root, selected=None):
     agents = {}
     for agent in chosen:
         executable = setup.find_executable(agent)
-        version = setup.probe_version(executable)
-        managed = False
-        integrity = "not_managed"
-        try:
-            if setup.managed_state(agent):
-                managed, integrity = True, "ok"
-        except setup.SetupError:
-            managed, integrity = True, "managed_install_invalid"
+        # Validate BOTH the wrapper and payload before even --version.
+        managed, integrity = _managed_integrity(agent)
+        version = _version(executable, probe_versions, integrity)
         agents[agent] = {"installed": bool(executable), "path": setup.location(executable),
                          "version": version["version"], "version_status": version["status"],
                          "enabled": bool(cfg and agent in cfg["enabled"]), "managed": managed,
@@ -141,21 +211,26 @@ def offline(root, selected=None):
     runtimes = {}
     for name in ("node", "npm", "bun"):
         executable = setup.find_executable(name)
-        runtimes[name] = {"path": setup.location(executable), **setup.probe_version(executable)}
-    parity = _parity(root, chosen, names)
+        runtimes[name] = {"path": setup.location(executable), **_version(executable, probe_versions)}
+    parity = _parity(root, chosen)
     ok = (config_state == "ok" and readable and parity["status"] == "ok"
-          and all(a["installed"] and a["version_status"] == "ok"
+          and all(a["installed"] and (not probe_versions or a["version_status"] == "ok")
                   and a["integrity"] in ("ok", "not_managed") for a in agents.values()))
     reason = "diagnostics_ok" if ok else (config_state if config_state != "ok" else "diagnostics_attention")
     return setup.result("ok" if ok else "blocked", reason, None if ok else "repair_agents",
                         mode="offline", selected=chosen, config={"status": config_state}, agents=agents,
-                        runtimes=runtimes, keys={"presence": presence, "inventory_readable": readable},
+                        version_probes={"requested": probe_versions}, runtimes=runtimes,
+                        keys={"presence": presence, "inventory_readable": readable},
                         parity=parity, live={"requested": False, "reason": "live_not_requested"},
                         path_ready=str(setup.home() / ".local/bin") in os.environ.get("PATH", "").split(os.pathsep),
                         runner_path_ready=True)
 
 
 def _live_one(root, agent):
+    # Recheck at the execution boundary, including changes since diagnostics or
+    # an explicitly requested version probe. --live never bypasses integrity.
+    if _managed_integrity(agent)[1] == "managed_install_invalid":
+        return {"status": "blocked", "reason": "managed_install_invalid", "quota": "unknown"}
     runner = root / "skills/delegate-task/scripts/run-agent.sh"
     if not runner.is_file():
         return {"status": "blocked", "reason": "runner_missing", "quota": "unknown"}
@@ -187,8 +262,8 @@ def _live_one(root, agent):
             else "live_agent_failed", "quota": "unknown"}
 
 
-def verify(root, selected, live=False):
-    report = offline(root, selected)
+def verify(root, selected, live=False, probe_versions=False):
+    report = offline(root, selected, probe_versions)
     report["operation"] = "verify"
     if report["config"]["status"] == "ok" and any(not a["enabled"] for a in report["agents"].values()):
         report.update(status="blocked", reason="agents_not_enabled", next_action="configure_agents")
@@ -201,10 +276,14 @@ def verify(root, selected, live=False):
     observed = {}
     for a in selected:
         entry = report["agents"][a]
-        if not entry["installed"] or not entry["enabled"] or entry["integrity"] == "managed_install_invalid":
+        if entry["integrity"] == "managed_install_invalid":
+            observed[a] = {"status": "blocked", "reason": "managed_install_invalid", "quota": "unknown"}
+        elif not entry["installed"] or not entry["enabled"]:
             observed[a] = {"status": "blocked", "reason": "live_prerequisites_missing", "quota": "unknown"}
         else:
             observed[a] = _live_one(root, a)
+            if observed[a]["reason"] == "managed_install_invalid":
+                entry["integrity"] = "managed_install_invalid"
     ok = all(entry["status"] == "ok" for entry in observed.values())
     quota = any(entry["quota"] == "limited" for entry in observed.values())
     report.update(status="ok" if ok and report["status"] == "ok" else "blocked",
@@ -215,12 +294,14 @@ def verify(root, selected, live=False):
 
 
 def configure(subparsers):
-    doctor = subparsers.add_parser("doctor", help="Offline, name-only diagnostics (always JSON)")
+    doctor = subparsers.add_parser("doctor", help="Static, read-only diagnostics by default (always JSON)")
     doctor.add_argument("--json", action="store_true", help="Compatibility flag; output is always JSON")
+    doctor.add_argument("--probe-versions", action="store_true", help="Authorize agent/runtime --version execution (may write files)")
     doctor.set_defaults(command="doctor", diagnostics_action="doctor", _gba_handler=handle)
-    verify_parser = subparsers.add_parser("verify", help="Offline verification; --live opts into a provider OK call")
+    verify_parser = subparsers.add_parser("verify", help="Static verification; --live opts into a provider OK call")
     verify_parser.add_argument("--agents", required=True, help="Comma-separated claude,codex,pi,omp")
     verify_parser.add_argument("--live", action="store_true", help="Authorize one provider OK request per selected enabled agent")
+    verify_parser.add_argument("--probe-versions", action="store_true", help="Authorize agent/runtime --version execution (may write files)")
     verify_parser.set_defaults(command="verify", diagnostics_action="verify", _gba_handler=handle)
 
 
@@ -229,10 +310,12 @@ def handle(args, root):
         if setup.platform.system() != "Linux":
             return setup.result("blocked", "unsupported_platform", "diagnose_on_linux_box")
         action = getattr(args, "diagnostics_action", getattr(args, "command", "doctor"))
+        probe_versions = bool(getattr(args, "probe_versions", False))
         if action == "doctor":
-            return offline(Path(root))
+            return offline(Path(root), probe_versions=probe_versions)
         if action == "verify":
-            return verify(Path(root), setup.selected_agents(getattr(args, "agents", None)), bool(getattr(args, "live", False)))
+            return verify(Path(root), setup.selected_agents(getattr(args, "agents", None)),
+                          bool(getattr(args, "live", False)), probe_versions)
         return setup.result("error", "invalid_diagnostics_action", "doctor")
     except setup.SetupError as exc:
         return setup.result("blocked", exc.reason, exc.next_action)
