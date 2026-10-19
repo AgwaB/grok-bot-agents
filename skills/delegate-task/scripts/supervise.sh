@@ -102,9 +102,10 @@ agent_pid() {
     fi
     return
   fi
+  expected=$(cat "$R/workdir.path" 2>/dev/null || true)
   for c in /proc/[0-9]*; do
     p=${c#/proc/}
-    case "$(readlink "$c/cwd" 2>/dev/null)" in "$R/wt"|"$R/work") ;; *) continue;; esac
+    case "$(readlink "$c/cwd" 2>/dev/null)" in "$R/wt"|"$R/work"|"${expected:-/nonexistent}") ;; *) continue;; esac
     [ "$(cat "$c/comm" 2>/dev/null)" = timeout ] && { echo "$p"; return; }
   done
 }
@@ -140,7 +141,7 @@ PY
 
 out_mtime() {  # newest write among the run's logs and session files
   { stat -c %Y "$R/stdout.log" "$R/stderr.log" 2>/dev/null
-    [ -d "$R/sessions" ] && find "$R/sessions" -type f -printf '%T@\n' 2>/dev/null | cut -d. -f1
+    [ -d "$R/sessions" ] && find -H "$R/sessions" -type f -printf '%T@\n' 2>/dev/null | cut -d. -f1
     stat -c %Y "$R/prompt.md" 2>/dev/null; } | sort -n | tail -1
 }
 

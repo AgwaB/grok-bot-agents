@@ -6,6 +6,8 @@ import re
 import subprocess
 import sys
 
+from session_state import events, session_info
+
 agent, run_dir, rc, secs, workdir = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
 res_path = os.path.join(run_dir, "result.md")
 
@@ -30,24 +32,6 @@ def write_artifact(path, text, atomic=False):
         sys.exit(1)
 
 
-def events(text):
-    """Accept legacy Claude JSON and JSONL. Only LF separates records, not Unicode separators."""
-    try:
-        obj = json.loads(text)
-        if isinstance(obj, dict):
-            yield obj
-            return
-    except ValueError:
-        pass
-    for line in text.split("\n"):
-        try:
-            obj = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(obj, dict):
-            yield obj
-
-
 def text_value(value):
     if isinstance(value, str):
         return value
@@ -59,14 +43,11 @@ def text_value(value):
 
 
 raw, stderr = read_log("stdout.log"), read_log("stderr.log")
-result, session, last_stop = "", None, None
+result, last_stop = "", None
 terminal, failure, stream_error = False, "", ""
 for ev in events(raw):
     typ = ev.get("type")
-    if typ in ("session", "thread.started"):
-        session = ev.get("id") or ev.get("thread_id") or session
     if agent == "claude":
-        session = ev.get("session_id") or session
         # A result is authoritative; assistant/tool messages and deltas are not a verdict.
         if typ == "result" or ("is_error" in ev and "result" in ev):
             terminal = True
@@ -177,7 +158,9 @@ meta = {"agent": agent, "status": status, "error_kind": error_kind, "resumable":
         "last_stop_reason": last_stop, "pi_retry": os.environ.get("PI_RETRY") or None,
         "permission": os.environ.get("PERM"), "model": os.environ.get("MODEL") or None,
         "reasoning": os.environ.get("REASONING") or None, "worktree_branch": os.environ.get("WORKTREE"), "exit_code": rc, "seconds": secs, "run_dir": run_dir,
-        "kind": os.environ.get("KIND"), "workdir": workdir, "session_id": session,
+        "kind": os.environ.get("KIND"), "workdir": workdir,
+        "resume_mode": os.environ.get("RESUME_MODE") or "fresh",
+        **session_info(agent, run_dir, workdir),
         "changed_files": changed, "artifacts": artifacts,
         "review_unchanged": not review_modified if os.environ.get("KIND") == "review" else None, "result_file": res_path}
 # A supervisor must never observe a half-written terminal record.

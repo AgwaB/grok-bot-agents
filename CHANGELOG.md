@@ -4,6 +4,13 @@
 
 First release.
 
+- Add opt-in `resume-run.sh --native` for Claude/Codex/Pi/omp: checkpoint WIP and
+  continue the CLI session in the same worktree, with fresh run logs, preserved permissions,
+  interrupted-tool verification guidance and explicit fresh-session fallback on missing
+  sessions or startup rejection. Keep default recovery fresh-session/new-worktree.
+  Recover IDs from run-owned logs/files even without terminal metadata; record session
+  files and observe their writes across native continuations. Add isolated fake-CLI tests.
+
 - Generalize the runner research's experiment descriptions and remove machine-local
   paths/internal investigation notes while retaining findings and source citations.
 

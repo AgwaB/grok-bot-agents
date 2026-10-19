@@ -114,7 +114,8 @@ bash scripts/run-agent.sh --agent pi --review /workspace/repo [--base main] --pr
 ```
 
 The runner:
-- `--cwd` is a git repo: always its own worktree and branch `agent/<run-id>` in `<run-dir>/wt`
+- `--cwd` is a git repo: its own worktree and branch `agent/<run-id>` in `<run-dir>/wt`
+  (only `resume-run.sh --native` reuses an existing worktree)
 - no `--cwd`, or `--cwd` isn't a repo: works in `<run-dir>/work`. A non-repo `--cwd` and every `--input DIR` are passed as extra readable dirs (`--add-dir` for Claude, Codex and omp; Pi gets the absolute paths in the brief)
 - private, exclusively allocated run dirs: a reused/unsafe `--id` is rejected instead of overwriting logs.
   `--timeout` must be positive seconds; it bounds even a silent run
@@ -132,11 +133,12 @@ The runner:
 - prints a JSON summary: status (`ok`, `error`, `timeout`, `rate_limited`), `error_kind` (`conn_error`
   for transport failure; `incomplete_output` for exit 0 without terminal completion), `resumable`,
   the **actual** process `exit_code`, permission, model, reasoning, branch, `changed_files` (repo),
-  `artifacts` (up to 100), a summary of at most 1500 chars, session_id, run_dir.
+  `artifacts` (up to 100), a summary of at most 1500 chars, `session_id` (all CLIs),
+  `session_file` (owned Pi/omp file when available), `resume_mode` (`fresh`/`native`), run_dir.
   A nonzero exit never becomes success; final error text outranks partial prose/old reconnect stderr.
   `meta.json` is published atomically. Rate-limit cleanup retains new commits and ignored artifacts
 
-Permission flags (checked on codex 0.163.0, Claude Code 2.1.197, pi 1.3.0, omp 18.12.1):
+Permission flags (checked on codex 0.163.0, Claude Code 2.1.295, pi 1.3.0, omp 18.12.1):
 
 | | full-auto (default) | safe | `--read-only` |
 |---|---|---|---|
@@ -200,6 +202,28 @@ reused across new worktrees; old absolute paths and already-executed tool action
 the new id. Tell the user in one line that it was restarted and why. Stalls, deaths and `conn_error` share one
 cap: after 2 restarts of the same task, stop and tell the user.
 
+**Opt-in native recovery:** `bash scripts/resume-run.sh <id> --native --kill` reuses the CLI's
+conversation in the **same worktree/branch** (or non-repo work directory). It still checkpoints WIP
+first and allocates a new run ID/log directory; supervise the ID in the returned summary. Without
+`--kill`, a live run is refused; `--dry-run` writes nothing. Review and finished-ok runs remain refused.
+
+| CLI | Native resume arguments (other runner flags retained) |
+|---|---|
+| Claude | `--resume <session_id>` |
+| Codex | `exec -C <workdir> resume --json -o <result> <session_id> <prompt>` |
+| Pi | `--session <owned-session-file>` |
+| omp | `--resume <owned-session-file>` |
+
+Pi/omp retain the owned session store for lookup and stall observation; no global session-tree scan.
+Same-worktree native recovery preserves conversation context and paths, but mutates the old session
+and can retain stale assumptions. The continuation brief requires verifying interrupted tool effects
+(e.g. a half-done commit/install) **before repeating them**; neither mode is exactly-once.
+Missing IDs/files or a clear CLI startup rejection trigger a warning and fresh-session fallback;
+a rejected attempt keeps its logs and the fallback gets the next ID. Auth/model/network failures or
+failures after agent/tool progress do not trigger fresh replay. Native overrides after `--` are limited
+to model, reasoning, permission, read-only, timeout and input directories, not agent/cwd/session/ID.
+The default and automatic bot recovery remain fresh-session/new-worktree unless native was opted into.
+
 `supervise.sh` line: `status=running|done|failed|stalled next=continue|return run_dir=DIR reason=... idle=Ns
 cpu_delta=Ns forks=N remaining=Ns resumable=0|1`. Details go to `<run-dir>/supervise.log`. Options: `--slice S` (one call,
 default 600), `--interval S` (30), `--stall-min M` (10), `--stall-action report|restart`
@@ -212,8 +236,8 @@ Observation gaps and detected VM wakes reset its grace window; they do not exten
 - 3 to 6 lines: worker and why, result, checks, branch or artifact paths, run dir. No raw logs.
 - Want to share a file? Send it from `artifacts`. Don't paste long content.
 - `error` / `timeout`: read `stderr_tail`, fix it (auth, model id, deps) or switch worker. At most 2 retries.
-- Continue explicitly with `--resume <session_id>` (Claude/Codex) or the saved session file for
-  Pi/omp when lookup is scoped to a new run's session directory. Check cwd/tool side effects first.
+- Use `resume-run.sh <id> --native` only for opted-in same-worktree recovery of an interrupted run.
+  Direct `run-agent.sh --resume` still creates a new worktree; it is not the safe same-worktree shortcut.
 
 ## Known limits
 
@@ -242,11 +266,12 @@ Observation gaps and detected VM wakes reset its grace window; they do not exten
 - **Recovery is not exactly-once.** Checkpoint/re-prompt can repeat external effects. The two-restart cap
   is bot policy, not a cross-process lock. There is no global concurrency/quota scheduler or log rotation;
   serialize resumes of the same task. Re-supply external `--input` dirs and nondefault timeout via overrides.
-  PID + cwd checks reduce stale-PID mistakes but are not start-time/boot fencing.
+  Native recovery shares the old worktree and transcript: retain the original run directory and never
+  resume two members of the same chain concurrently. PID + cwd checks are not start-time/boot fencing.
 - Runner supervision requires the Linux box's `/proc`, GNU `timeout`/utilities, Bash and Python; native
   macOS/Windows supervision is not certified. Worktrees do not isolate credentials or shared services.
   See [source-backed runner research](../../docs/research/agent-runners.md) and
-  [offline validation](../../TESTING.md); no proxy or native-session rewrite was added.
+  [validation](../../TESTING.md); native resume uses CLI flags, not transcript rewriting or a proxy.
 
 ## Always ask first
 Full auto covers what happens **inside** the run. These still need the user's OK every time:

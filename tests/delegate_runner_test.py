@@ -16,6 +16,18 @@ if "--help" in sys.argv:
     print("--approve")
     sys.exit(0)
 pathlib.Path(os.environ["FAKE_ARGS"]).write_text(json.dumps(sys.argv[1:]))
+with open(os.environ["FAKE_ARGS"] + ".calls", "a") as f:
+    f.write(json.dumps({"args": sys.argv[1:], "cwd": os.getcwd()}) + "\n")
+native = "--session" in sys.argv or "--resume" in sys.argv or "resume" in sys.argv
+if native and os.environ.get("FAKE_NATIVE_REJECT"):
+    sys.stderr.write(os.environ["FAKE_NATIVE_REJECT"])
+    sys.exit(2)
+if os.environ.get("FAKE_SESSION_ID") and "--session-dir" in sys.argv:
+    directory = pathlib.Path(sys.argv[sys.argv.index("--session-dir") + 1])
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / ("timestamp_" + os.environ["FAKE_SESSION_ID"] + ".jsonl")
+    if not path.exists():
+        path.write_text(json.dumps({"type": "session", "id": os.environ["FAKE_SESSION_ID"], "cwd": os.getcwd()}) + "\n")
 if os.environ.get("FAKE_TOUCH"):
     pathlib.Path("saved.txt").write_text("keep this work")
 if os.environ.get("FAKE_COMMIT"):
@@ -316,6 +328,268 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(resumed["run_dir"], str(self.runs / (r.name + "-r2")))
         self.assertEqual(resumed["permission"], "safe")
 
+    def session_events(self, agent, success=False):
+        sid = "session-123"
+        if agent == "claude":
+            return [{"type": "system", "subtype": "init", "session_id": sid},
+                    {"type": "result", "subtype": "success", "is_error": not success,
+                     "result": "continued" if success else "Request timed out", "session_id": sid}]
+        if agent == "codex":
+            return [{"type": "thread.started", "thread_id": sid},
+                    {"type": "turn.completed"} if success else
+                    {"type": "turn.failed", "error": {"message": "Request timed out"}}]
+        return [{"type": "session", "id": sid},
+                message("continued" if success else "", "stop" if success else "error",
+                        None if success else "Request timed out")]
+
+    def native_run(self, agent="pi", repo=None, permission="safe"):
+        self.env["FAKE_SESSION_ID"] = "session-123"
+        extra = ("--cwd", repo) if repo else ()
+        extra += ("--read-only",) if permission == "read-only" else ("--permission", permission)
+        return self.run_agent(agent, self.session_events(agent), extra=extra)
+
+    def next_output(self, agent="pi", success=True):
+        Path(self.env["FAKE_OUTPUT"]).write_text("".join(json.dumps(e) + "\n" for e in self.session_events(agent, success)))
+        self.env.update(FAKE_RC="0", FAKE_STDERR="", FAKE_DELAY="0")
+
+    def test_native_resume_all_clis_keep_worktree_session_and_permissions(self):
+        repo = self.repo()
+        for agent in ("claude", "codex", "pi", "omp"):
+            with self.subTest(agent=agent):
+                self.env["FAKE_TOUCH"] = "1"
+                m = self.native_run(agent, repo)
+                self.env.pop("FAKE_TOUCH")
+                r = Path(m["run_dir"])
+                old_prompt = (r / "prompt.md").read_bytes()
+                self.assertEqual(m["session_id"], "session-123")
+                worktrees = [line for line in self.git(repo, "worktree", "list", "--porcelain").splitlines()
+                             if line.startswith(("worktree ", "branch "))]
+                self.next_output(agent)
+                p = self.command("resume-run.sh", r, "--native")
+                self.assertEqual(p.returncode, 0, p.stderr)
+                resumed = json.loads(p.stdout)
+                self.assertEqual((resumed["workdir"], resumed["worktree_branch"], resumed["permission"],
+                                  resumed["session_id"], resumed["resume_mode"]),
+                                 (m["workdir"], m["worktree_branch"], "safe", "session-123", "native"))
+                self.assertEqual(worktrees, [line for line in self.git(repo, "worktree", "list", "--porcelain").splitlines()
+                                             if line.startswith(("worktree ", "branch "))])
+                self.assertEqual(self.git(r / "wt", "status", "--porcelain"), "")
+                self.assertIn("checkpoint before resume", self.git(r / "wt", "log", "-1", "--format=%s"))
+                self.assertEqual((r / "prompt.md").read_bytes(), old_prompt)
+                new = Path(resumed["run_dir"])
+                self.assertIn("verify its actual state and side effects", (new / "prompt.md").read_text())
+                self.assertIn("commit or install", (new / "prompt.md").read_text())
+                args = json.loads(Path(self.env["FAKE_ARGS"]).read_text())
+                call = json.loads(Path(self.env["FAKE_ARGS"] + ".calls").read_text().splitlines()[-1])
+                self.assertEqual(call["cwd"], m["workdir"])
+                if agent in ("pi", "omp"):
+                    flag = "--session" if agent == "pi" else "--resume"
+                    self.assertEqual(args[args.index(flag) + 1], m["session_file"])
+                    self.assertEqual(Path(args[args.index("--session-dir") + 1]).resolve(), (r / "sessions").resolve())
+                    self.assertEqual(resumed["session_file"], m["session_file"])
+                elif agent == "claude":
+                    self.assertEqual(args[args.index("--resume") + 1], m["session_id"])
+                else:
+                    self.assertIn("resume", args)
+                    self.assertLess(args.index("-C"), args.index("resume"))
+                    self.assertIn("--json", args)
+                    self.assertIn("-o", args)
+                    self.assertIn('sandbox_mode="workspace-write"', args)
+                    self.assertEqual(args[-2], m["session_id"])
+
+    def test_native_read_only_permissions_remain_restricted(self):
+        for agent, expected in (("pi", "--tools"), ("omp", "--tools"),
+                                ("claude", "plan"), ("codex", 'sandbox_mode="read-only"')):
+            with self.subTest(agent=agent):
+                m = self.native_run(agent, permission="read-only")
+                self.next_output(agent)
+                p = self.command("resume-run.sh", m["run_dir"], "--native")
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertEqual(json.loads(p.stdout)["permission"], "read-only")
+                self.assertIn(expected, json.loads(Path(self.env["FAKE_ARGS"]).read_text()))
+
+    def test_native_nonrepo_reuses_work_directory_and_does_not_touch_home_config(self):
+        self.runs = self.root / "runs with spaces ü"
+        self.env["AGENT_RUNS_ROOT"] = str(self.runs)
+        home = Path(self.env["HOME"])
+        sentinels = []
+        for name in (".claude", ".codex", ".pi", ".omp", ".grok-bot-agents"):
+            d = home / name
+            d.mkdir()
+            f = d / "sentinel"
+            f.write_text("unchanged\n")
+            sentinels.append(f)
+        keys = home / ".agent-keys"
+        keys.write_text("# fake home only\n")
+        sentinels.append(keys)
+        before = {p: p.read_bytes() for p in sentinels}
+        m = self.native_run()
+        self.next_output()
+        p = self.command("resume-run.sh", m["run_dir"], "--native")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(json.loads(p.stdout)["workdir"], m["workdir"])
+        self.assertEqual(before, {p: p.read_bytes() for p in sentinels})
+
+    def test_native_missing_session_id_falls_back_to_fresh(self):
+        repo = self.repo()
+        m = self.run_agent("claude", [], rc=1, extra=("--cwd", repo))
+        self.next_output("claude")
+        p = self.command("resume-run.sh", m["run_dir"], "--native")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        resumed = json.loads(p.stdout)
+        self.assertIn("falling back to fresh-session", p.stderr)
+        self.assertNotEqual(resumed["workdir"], m["workdir"])
+        self.assertEqual(resumed["resume_mode"], "fresh")
+        self.assertNotIn("--resume", json.loads(Path(self.env["FAKE_ARGS"]).read_text()))
+
+    def test_native_missing_or_wrong_project_session_file_falls_back(self):
+        for wrong_cwd in (False, True):
+            with self.subTest(wrong_cwd=wrong_cwd):
+                m = self.native_run()
+                path = Path(m["session_file"])
+                if wrong_cwd:
+                    path.write_text(json.dumps({"type": "session", "id": m["session_id"], "cwd": str(self.root)}) + "\n")
+                else:
+                    path.unlink()
+                self.next_output()
+                p = self.command("resume-run.sh", m["run_dir"], "--native")
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertIn("missing session id, owned session file or workdir", p.stderr)
+                self.assertEqual(json.loads(p.stdout)["resume_mode"], "fresh")
+
+    def test_native_startup_rejection_falls_back_once_for_each_cli(self):
+        repo = self.repo()
+        for agent, reason in (("claude", "No conversation found with session ID: session-123"),
+                              ("codex", "Session session-123 not found"),
+                              ("pi", "Session file does not exist"),
+                              ("omp", "error: unknown option '--resume'")):
+            with self.subTest(agent=agent):
+                m = self.native_run(agent, repo)
+                self.next_output(agent)
+                self.env["FAKE_NATIVE_REJECT"] = reason
+                p = self.command("resume-run.sh", m["run_dir"], "--native", "--", "--timeout", "10")
+                self.env.pop("FAKE_NATIVE_REJECT")
+                self.assertEqual(p.returncode, 0, p.stderr)
+                resumed = json.loads(p.stdout)
+                self.assertIn("CLI rejected native resume", p.stderr)
+                self.assertTrue(resumed["run_dir"].endswith("-r3"))
+                self.assertEqual(resumed["resume_mode"], "fresh")
+                self.assertNotEqual(resumed["workdir"], m["workdir"])
+                self.assertEqual(resumed["permission"], "safe")
+                self.assertTrue(Path(m["workdir"]).exists())
+                attempt = Path(m["run_dir"] + "-r2")
+                self.assertEqual(json.loads((attempt / "meta.json").read_text())["status"], "error")
+
+    def test_native_auth_and_task_errors_do_not_trigger_fresh_replay(self):
+        for progress in (False, True):
+            with self.subTest(progress=progress):
+                m = self.native_run()
+                if progress:
+                    Path(self.env["FAKE_OUTPUT"]).write_text(json.dumps(message("", "error", "Session file does not exist")) + "\n")
+                else:
+                    self.env["FAKE_NATIVE_REJECT"] = "Invalid API key"
+                p = self.command("resume-run.sh", m["run_dir"], "--native")
+                self.env.pop("FAKE_NATIVE_REJECT", None)
+                self.assertEqual(p.returncode, 1, p.stderr)
+                self.assertNotIn("falling back", p.stderr)
+                self.assertEqual(json.loads(p.stdout)["resume_mode"], "native")
+                self.assertFalse(Path(m["run_dir"] + "-r3").exists())
+
+    def test_native_invalid_login_session_is_not_resume_rejection(self):
+        m = self.native_run()
+        self.env["FAKE_NATIVE_REJECT"] = "401 Unauthorized: invalid session token"
+        p = self.command("resume-run.sh", m["run_dir"], "--native")
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertNotIn("falling back", p.stderr)
+        self.assertFalse(Path(m["run_dir"] + "-r3").exists())
+
+    def test_native_recovers_session_without_terminal_meta(self):
+        for agent in ("claude", "codex", "pi", "omp"):
+            with self.subTest(agent=agent):
+                m = self.native_run(agent)
+                r = Path(m["run_dir"])
+                (r / "meta.json").unlink()
+                if agent in ("pi", "omp"):
+                    (r / "stdout.log").write_text("truncated\n")  # recover from owned header
+                self.next_output(agent)
+                p = self.command("resume-run.sh", r, "--native")
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertEqual(json.loads(p.stdout)["resume_mode"], "native")
+
+    def test_native_dry_run_preserves_wip_and_rejects_scope_overrides(self):
+        m = self.native_run(repo=self.repo())
+        r = Path(m["run_dir"])
+        (Path(m["workdir"]) / "wip.txt").write_text("uncommitted")
+        before = {str(p): p.read_bytes() for p in r.rglob("*") if p.is_file()}
+        p = self.command("resume-run.sh", r, "--native", "--dry-run")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("--resume-in-place", p.stdout)
+        self.assertIn("would commit WIP", p.stderr)
+        self.assertEqual(before, {str(p): p.read_bytes() for p in r.rglob("*") if p.is_file()})
+        for flag in ("--agent", "--cwd", "--id", "--resume", "--review", "--prompt"):
+            p = self.command("resume-run.sh", r, "--native", "--", flag, "other")
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("unsupported --native override", p.stdout)
+        self.assertEqual(self.git(r / "wt", "status", "--porcelain"), "?? wip.txt")
+
+    def test_native_live_run_refuses_without_kill_then_checkpoints_and_resumes(self):
+        repo = self.repo()
+        self.env.update(FAKE_SESSION_ID="session-123", FAKE_TOUCH="1", FAKE_DELAY="60")
+        self.next_output(success=False)
+        self.env["FAKE_DELAY"] = "60"
+        r = self.runs / "live"
+        p = subprocess.Popen(["bash", str(SCRIPTS / "run-agent.sh"), "--agent", "pi", "--id", "live",
+                              "--cwd", str(repo), "--prompt", "multi-step test"], env=self.env,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        def cleanup():
+            if p.poll() is None:
+                os.killpg(p.pid, signal.SIGTERM)
+            p.wait(timeout=5)
+        self.addCleanup(cleanup)
+        deadline = time.monotonic() + 5
+        while not (r / "wt/saved.txt").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue((r / "wt/saved.txt").exists())
+        refused = self.command("resume-run.sh", r, "--native")
+        self.assertEqual(refused.returncode, 5, refused.stderr)
+        self.assertIn("still alive", refused.stdout)
+        self.assertIsNone(p.poll())
+        self.assertEqual(self.git(r / "wt", "status", "--porcelain"), "?? saved.txt")
+        self.env.pop("FAKE_TOUCH")
+        self.next_output()
+        resumed = self.command("resume-run.sh", r, "--native", "--kill")
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        p.wait(timeout=5)
+        self.assertEqual(json.loads(resumed.stdout)["workdir"], str(r / "wt"))
+        self.assertEqual(self.git(r / "wt", "status", "--porcelain"), "")
+        self.assertIn("checkpoint before resume", self.git(r / "wt", "log", "-1", "--format=%s"))
+
+    def test_native_chain_and_fresh_resume_from_native_keep_saved_work(self):
+        m = self.native_run(repo=self.repo())
+        original = m["workdir"]
+        for _ in range(2):
+            (Path(original) / "saved.txt").write_text("keep chain work")
+            p = self.command("resume-run.sh", m["run_dir"], "--native")
+            self.assertEqual(p.returncode, 1, p.stderr)  # fake continues to report a transport failure
+            m = json.loads(p.stdout)
+            self.assertEqual(m["workdir"], original)
+            self.assertTrue(Path(m["session_file"]).is_file())
+        self.next_output()
+        p = self.command("resume-run.sh", m["run_dir"])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        fresh = json.loads(p.stdout)
+        self.assertNotEqual(fresh["workdir"], original)
+        self.assertEqual((Path(fresh["workdir"]) / "saved.txt").read_text(), "keep chain work")
+        self.assertEqual(fresh["resume_mode"], "fresh")
+
+    def test_native_rate_limit_never_removes_original_worktree(self):
+        m = self.native_run(repo=self.repo())
+        Path(self.env["FAKE_OUTPUT"]).write_text(json.dumps(message("", "error", "429 Too many requests")) + "\n")
+        p = self.command("resume-run.sh", m["run_dir"], "--native")
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertEqual(json.loads(p.stdout)["status"], "rate_limited")
+        self.assertTrue(Path(m["workdir"]).exists())
+
     def idle_run(self, agent=None):
         self.count += 1
         r = self.runs / f"idle-{self.count}"
@@ -397,6 +671,22 @@ class RunnerTests(unittest.TestCase):
                 proc = self.supervise(r)
                 self.assertIn("status=running", proc.stdout)
                 self.assertNotIn("idle_suspected", proc.stdout)
+
+    def test_native_linked_session_writes_prevent_stall_but_global_writes_do_not(self):
+        r, _ = self.idle_run("pi")
+        owned = self.root / "owned-sessions"
+        owned.mkdir()
+        (r / "sessions").symlink_to(owned, target_is_directory=True)
+        global_sessions = Path(self.env["HOME"]) / ".pi/agent/sessions"
+        global_sessions.mkdir(parents=True)
+        (global_sessions / "other-task.jsonl").write_text("{}\n")
+        proc = self.supervise(r)
+        self.assertIn("status=stalled", proc.stdout)
+        (owned / "owned.jsonl").write_text("{}\n")
+        proc = self.supervise(r)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("status=running", proc.stdout)
+        self.assertNotIn("idle_suspected", proc.stdout)
 
     def test_observation_gap_gives_full_wake_grace_without_dmesg(self):
         r, _ = self.idle_run()

@@ -5,13 +5,14 @@
 #   run-agent.sh --agent codex|claude|pi|omp [--cwd DIR] [--input DIR ...] (--prompt-file FILE | --prompt TEXT)
 #                [--model M] [--reasoning LEVEL] [--permission full-auto|safe] [--read-only]
 #                [--timeout SECONDS] [--id RUN_ID] [--resume SESSION] [--review DIR [--base REF]]
-# --cwd is a git repo  -> its own worktree + branch agent/<run-id> (always).
+# --cwd is a git repo  -> its own worktree + branch agent/<run-id> (except resume-run.sh --native).
+# --resume-in-place is the internal resume-run.sh opt-in: requires --cwd and --resume.
 # --review DIR [--base REF] -> read-only review in place (no worktree); fails if DIR changes.
 # otherwise / no --cwd -> works in <run-dir>/work; a non-repo --cwd and --input dirs become extra readable dirs.
 set -uo pipefail
 umask 077  # run prompts, transcripts and session data are private
 
-REVIEW="" BASE="" INPUTS=() AGENT="" CWD="" PROMPT="" PROMPT_FILE="" MODEL="" REASONING="" PERM="" TIMEOUT="" RUN_ID="" READONLY=0 RESUME=""
+REVIEW="" BASE="" INPUTS=() AGENT="" CWD="" PROMPT="" PROMPT_FILE="" MODEL="" REASONING="" PERM="" TIMEOUT="" RUN_ID="" READONLY=0 RESUME="" RESUME_IN_PLACE=0
 CONFIG="${GROK_BOT_AGENTS_CONFIG:-${GROK_AGENTS_CONFIG:-$HOME/.grok-bot-agents/config.json}}"
 if [ -z "${GROK_BOT_AGENTS_CONFIG:-}${GROK_AGENTS_CONFIG:-}" ] && [ ! -e "$CONFIG" ] && [ -e "$HOME/.grok-agents/config.json" ]; then
   CONFIG="$HOME/.grok-agents/config.json"  # legacy dir from before the rename
@@ -39,6 +40,7 @@ while [ $# -gt 0 ]; do
     --review) REVIEW="$2"; READONLY=1; shift 2;;   # review DIR in place, read-only, verified unchanged
     --base) BASE="$2"; shift 2;;
     --resume) RESUME="$2"; shift 2;;
+    --resume-in-place) RESUME_IN_PLACE=1; shift;;
     --worktree) shift;;   # accepted for compatibility; worktrees are always on
     -h|--help) sed -n '2,8p' "$0"; exit 0;;
     *) die "unknown arg: $1";;
@@ -82,6 +84,10 @@ case "$PERM" in full-auto|safe) ;; *) die "--permission must be full-auto or saf
 case "$TIMEOUT" in ''|*[!0-9]*) die "--timeout must be positive seconds";; esac
 [ "$TIMEOUT" -gt 0 ] || die "--timeout must be positive seconds"
 [ -n "$PROMPT_FILE" ] || [ -n "$PROMPT" ] || die "empty prompt"
+if [ "$RESUME_IN_PLACE" = 1 ]; then
+  [ -n "$CWD" ] && [ -n "$RESUME" ] && [ -z "$REVIEW" ] || die "--resume-in-place requires --cwd and --resume, not --review"
+  case "$AGENT" in pi|omp) [ -f "$RESUME" ] || die "native resume requires an existing session file";; esac
+fi
 
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$AGENT-$RANDOM}"
 case "$RUN_ID" in [!a-zA-Z0-9]*|*[!a-zA-Z0-9._-]*) die "invalid run id";; esac
@@ -100,7 +106,16 @@ fingerprint() {  # content hash of the tree (+ git status/HEAD when it's a repo)
   ( cd "$1" && { git rev-parse HEAD 2>/dev/null; git status --porcelain=v1 2>/dev/null;
     find . -path ./.git -prune -o -type f -print0 | sort -z | xargs -0 sha256sum 2>/dev/null; } | sha256sum | cut -d' ' -f1 )
 }
-if [ -n "$REVIEW" ]; then
+if [ "$RESUME_IN_PLACE" = 1 ]; then
+  WORKDIR="$(cd "$CWD" && pwd -P)"; KIND=work
+  if git -C "$WORKDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    KIND=repo; WORKTREE=$(git -C "$WORKDIR" rev-parse --abbrev-ref HEAD)
+  fi
+  # Keep the owned session store visible to the new run's supervisor and subsequent resumes.
+  case "$AGENT" in pi|omp)
+    ln -s "$(cd "$(dirname "$RESUME")" && pwd -P)" "$RUN_DIR/sessions" || die "could not link owned sessions";;
+  esac
+elif [ -n "$REVIEW" ]; then
   [ -d "$REVIEW" ] || die "review dir not found: $REVIEW"
   WORKDIR="$(cd "$REVIEW" && pwd -P)"; KIND="review"
   if git -C "$WORKDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -169,7 +184,8 @@ CMD=()
 case "$AGENT" in
   codex)
     # full-auto: --dangerously-bypass-approvals-and-sandbox | safe: -s workspace-write | read-only: -s read-only
-    if [ -n "$RESUME" ]; then CMD=(codex exec resume); else CMD=(codex exec -C "$WORKDIR" "${ADD_DIRS[@]}"); fi
+    CMD=(codex exec -C "$WORKDIR" "${ADD_DIRS[@]}")
+    [ -n "$RESUME" ] && CMD+=(resume)   # -C/--add-dir belong to exec, before the resume subcommand
     CMD+=(--json -o "$RUN_DIR/result.md" --skip-git-repo-check)
     case "$PERM" in
       full-auto) CMD+=(--dangerously-bypass-approvals-and-sandbox);;
@@ -232,11 +248,12 @@ pi_retry_cleanup
 
 REVIEW_MODIFIED=""
 if [ -n "$REVIEW" ]; then [ "$(fingerprint "$WORKDIR")" = "$FP_BEFORE" ] || REVIEW_MODIFIED=1; fi
-SUMMARY=$(PI_RETRY="$PI_RETRY" REVIEW_MODIFIED="$REVIEW_MODIFIED" PERM="$PERM" MODEL="$MODEL" REASONING="$REASONING" WORKTREE="$WORKTREE" KIND="$KIND" \
+RESUME_MODE=fresh; [ "$RESUME_IN_PLACE" = 1 ] && RESUME_MODE=native
+SUMMARY=$(RESUME_MODE="$RESUME_MODE" PI_RETRY="$PI_RETRY" REVIEW_MODIFIED="$REVIEW_MODIFIED" PERM="$PERM" MODEL="$MODEL" REASONING="$REASONING" WORKTREE="$WORKTREE" KIND="$KIND" \
   python3 "$(dirname "$0")/summarize_run.py" "$AGENT" "$RUN_DIR" "$RC" "$((END-START))" "$WORKDIR"); SRC=$?
 # Drop only a truly unchanged rate-limited worktree. A clean index can contain new commits;
 # ignored artifacts are also saved work, so neither may be discarded to make a retry look clean.
-if [ "$KIND" = repo ] && [ -n "$START_HEAD" ] && printf '%s' "$SUMMARY" | grep -q '"status": "rate_limited"' \
+if [ "$RESUME_IN_PLACE" = 0 ] && [ "$KIND" = repo ] && [ -n "$START_HEAD" ] && printf '%s' "$SUMMARY" | grep -q '"status": "rate_limited"' \
     && [ "$(git -C "$WORKDIR" rev-parse HEAD 2>/dev/null)" = "$START_HEAD" ] \
     && CLEAN=$(git -C "$WORKDIR" status --porcelain --ignored 2>/dev/null) && [ -z "$CLEAN" ]; then
   git -C "$CWD" worktree remove "$WORKDIR" >/dev/null 2>&1 && git -C "$CWD" branch -d "$WORKTREE" >/dev/null 2>&1

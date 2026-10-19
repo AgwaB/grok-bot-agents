@@ -18,12 +18,13 @@ is needed. The Python suite creates a clean environment, temporary HOME/run root
 fake versions of **all four CLIs** and npm, and disposable Git repositories. The
 existing Bash suite is launched with an empty environment to exclude config overrides.
 
-Latest hardening evidence: **31 Python tests passed**, **26 existing Bash checks
+Latest follow-up evidence: **47 Python tests passed**, **26 Pi-retry Bash checks
 passed**, ShellCheck **zero diagnostics** on all three changed shell scripts; shell
-syntax, temporary-cache Python compilation and `git diff --check` passed. Active LSP
-checks found no errors; numeric-conversion advisories in `summarize_run.py` were
-reviewed as shell-generated exit-code/elapsed-time inputs, not untrusted model text;
-a dynamic-regex advisory is a false positive on the fixed `AUTH_RE` literal.
+syntax, temporary-cache Python compilation and `git diff --check` passed. The full
+import suite also passed again (59 Python passes, one PowerShell skip, 26 Bash checks).
+Active LSP probes reported only reviewed numeric-input advisories and a new sibling-module
+import-resolution false positive; real script executions verified that import. No
+production-code suppressions were added.
 Version remains **0.1.0**. Coverage includes:
 
 - omp/Pi zero-exit errors; every reported transport phrase; retry recovery/exhaustion;
@@ -38,17 +39,49 @@ Version remains **0.1.0**. Coverage includes:
 - Exclusive/private run IDs and traversal rejection; permission recovery with/without
   metadata; write-free dry-run; absolute run-root preservation; WIP checkpoint/resume
   in a new worktree; rate-limit cleanup preserving new commits and ignored artifacts.
+- Native resume for all four fake CLIs: same cwd/branch/session, WIP checkpoint, live-run
+  refusal and `--kill`, safe/read-only preservation, metadata-less recovery, write-free
+  dry-run, scope-override rejection, non-repo/space-containing paths, linked session
+  activity, repeated native recovery and fresh recovery after a native attempt.
+- Missing IDs/files and CLI startup rejection fall back to fresh sessions with retained
+  attempt logs. Auth/session-token errors and failures after progress do not replay;
+  rate limits never remove the original native worktree. Fake home config sentinels stay unchanged.
 
 Before fixes, the first 12 parser tests exposed 28 failing subcases; the five supervision
 regressions failed; recovery/cleanup regressions reproduced permission expansion,
-run-ID overwrite and deletion of agent commits. Supplied freeze-test2 failure logs
+run-ID overwrite and deletion of agent commits. Historical freeze failure logs
 were also replayed through `summarize_run.py` in a temporary HOME: Codex (recorded rc 1),
 Claude and omp (forced rc 0 to test exit dishonesty) all yielded nonempty summaries,
-`error/conn_error/resumable=true`. No live agent, network-kill or actual suspend test
-was rerun; old logs are historical evidence, not new provider/platform certification.
-Global scheduling, simultaneous resumes, reboot/start-time PID fencing, native session
-migration, hostile filesystem races and macOS/Windows supervision remain untested.
-See [research and decisions](docs/research/agent-runners.md).
+`error/conn_error/resumable=true`. Those logs are historical evidence, not new
+provider/platform certification. Global scheduling, simultaneous resumes, reboot/start-time
+PID fencing, cross-worktree session migration, hostile filesystem races and macOS/Windows
+supervision remain untested. See [research and decisions](docs/research/agent-runners.md).
+
+### Bounded live native-resume check (Linux, 2026-10-19)
+
+One real Pi 1.3.0 check passed using `openai-codex/gpt-6-luna`, low reasoning, a
+throwaway Git repo and temporary run/config paths. Existing login was used normally;
+extensions, MCP, skills, templates, themes and context-file discovery were disabled
+with CLI flags for this check only. No auth files/keys were printed or copied.
+
+- Start: `run-agent.sh --agent pi --id pi-live --cwd <throwaway-repo> --model
+  openai-codex/gpt-6-luna --reasoning low --permission full-auto --timeout 180
+  --prompt-file <brief>`. The multi-step brief generated a random nonce in tool output
+  only, saved a first-phase file without the nonce, then called `sleep 120`.
+- Interrupt/recover during that tool call: `resume-run.sh <run-dir> --native --kill
+  -- --timeout 90`. Recovery finished `ok` in about 21 seconds, with the **same
+  workdir and session ID** and a WIP checkpoint commit.
+- The resumed agent recalled the original nonce, verified the saved work/checkpoint,
+  and wrote the second-phase file. Its continuation tools did **not** reread session
+  files, logs or earlier tool output; the nonce was absent from the saved work file.
+- Pi settings/models and the existing plugin config were byte-identical afterwards.
+  This is interruption/context-continuity evidence, not a host-suspend or exactly-once guarantee.
+
+Claude/Codex/omp native recovery: **not live-tested** in this bounded pass (no extra
+provider runs). Installed help/source checks covered Claude 2.1.295, Codex 0.163.0,
+Pi 1.3.0 and omp 18.12.1; fake-CLI tests cover all four. Codex `-C`/`--add-dir` precede
+`resume`; `--json`/`-o` are supported on `exec resume`. Pi uses `--session FILE`, omp
+uses `--resume FILE`, with the owned session store retained rather than a new empty lookup directory.
 
 ## Offline import regression suite (run from the repo root)
 
