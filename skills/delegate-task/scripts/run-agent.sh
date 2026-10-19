@@ -48,6 +48,7 @@ done
 case "$AGENT" in codex|claude|pi|omp) ;; *) die "unknown agent $AGENT";; esac
 
 # API keys kept out of chat live in ~/.agent-keys (mode 600); load them for non-interactive shells.
+# shellcheck disable=SC1091  # optional user-owned runtime file, not a repository source
 [ -f "$HOME/.agent-keys" ] && . "$HOME/.agent-keys"
 
 command -v "$AGENT" >/dev/null || die "$AGENT is not installed; run setup-agents" 3
@@ -172,7 +173,7 @@ case "$AGENT" in
     [ -n "$RESUME" ] && CMD+=("$RESUME")
     CMD+=("$P");;
   claude)
-    CMD=(claude -p --output-format json "${ADD_DIRS[@]}")
+    CMD=(claude -p --output-format stream-json --verbose --include-partial-messages "${ADD_DIRS[@]}")
     case "$PERM" in
       full-auto) CMD+=(--permission-mode bypassPermissions);;
       safe) CMD+=(--permission-mode acceptEdits);;
@@ -185,7 +186,7 @@ case "$AGENT" in
   pi)
     # pi has no approval system: full-auto and safe behave the same; read-only limits tools.
     CMD=(pi -p --mode json --session-dir "$RUN_DIR/sessions")
-    [ "$PERM" = read-only ] && CMD+=(--tools read,grep,find,ls)
+    [ "$PERM" = read-only ] && CMD+=(--tools 'read,grep,find,ls')
     [ -n "$MODEL" ] && CMD+=(--model "$MODEL")
     [ -n "$REASONING" ] && CMD+=(--thinking "$REASONING")
     [ -n "$RESUME" ] && CMD+=(--session "$RESUME")
@@ -197,7 +198,7 @@ case "$AGENT" in
     case "$PERM" in
       full-auto) CMD+=(--approval-mode yolo);;
       safe) CMD+=(--approval-mode write);;
-      read-only) CMD+=(--approval-mode write --tools read,grep,glob);;
+      read-only) CMD+=(--approval-mode write --tools 'read,grep,glob');;
     esac
     [ -n "$MODEL" ] && CMD+=(--model "$MODEL")
     [ -n "$REASONING" ] && CMD+=(--thinking "$REASONING")
@@ -220,7 +221,7 @@ pi_retry_cleanup
 
 REVIEW_MODIFIED=""
 if [ -n "$REVIEW" ]; then [ "$(fingerprint "$WORKDIR")" = "$FP_BEFORE" ] || REVIEW_MODIFIED=1; fi
-SUMMARY=$(PI_RETRY="$PI_RETRY" REVIEW_MODIFIED="$REVIEW_MODIFIED" AGENT="$AGENT" PERM="$PERM" MODEL="$MODEL" REASONING="$REASONING" WORKTREE="$WORKTREE" KIND="$KIND" \
+SUMMARY=$(PI_RETRY="$PI_RETRY" REVIEW_MODIFIED="$REVIEW_MODIFIED" PERM="$PERM" MODEL="$MODEL" REASONING="$REASONING" WORKTREE="$WORKTREE" KIND="$KIND" \
   python3 "$(dirname "$0")/summarize_run.py" "$AGENT" "$RUN_DIR" "$RC" "$((END-START))" "$WORKDIR"); SRC=$?
 # A rate-limited repo run that changed nothing: drop its empty worktree and branch so a retry starts clean.
 if [ "$KIND" = repo ] && printf '%s' "$SUMMARY" | grep -q '"status": "rate_limited"' && [ -z "$(git -C "$WORKDIR" status --porcelain 2>/dev/null)" ]; then
