@@ -158,7 +158,7 @@ def dest_of(rel):
     return os.path.join(dest_root, rel)
 
 ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-plan, skipped, conflicts, warnings, receipts = [], [], [], [], []
+plan, identical, skipped, conflicts, warnings, receipts = [], [], [], [], [], []
 staged_rels = []  # every allowlisted staged file, installed or identical
 for root, dirs, files in os.walk(stage, followlinks=False):
     for name in dirs[:]:
@@ -189,7 +189,9 @@ for root, dirs, files in os.walk(stage, followlinks=False):
         receipts.append({"rel": rel, "destination": dest, "sha256": hashlib.sha256(data).hexdigest()})
         if os.path.exists(dest):
             if os.path.islink(dest) or not os.path.isfile(dest): die(f"destination is not a regular file: {dest}")
-            if hashlib.sha256(data).hexdigest() == sha(dest): skipped.append({"path": rel, "why": "identical on box"}); continue
+            if hashlib.sha256(data).hexdigest() == sha(dest):
+                identical.append({"rel": rel, "kind": k, "src": full, "dest": dest})
+                skipped.append({"path": rel, "why": "identical on box"}); continue
             conflicts.append(rel)
         plan.append({"rel": rel, "kind": k, "src": full, "dest": dest, "data": data, "rewrites": nrw})
 
@@ -274,6 +276,7 @@ if db_selected:
     if not s_ok and b_ok and not force_auth:
         omp_auth["action"] = "kept_box_login"; db_selected = False
         plan = [x for x in plan if x["rel"] not in DB]
+        identical = [x for x in identical if x["rel"] not in DB]
         conflicts = [r for r in conflicts if r not in DB]; out["conflicts"] = conflicts
         for r in DB:
             if r in staged_rels: skipped.append({"path": r, "why": "kept the box's working omp login (staged login is disabled or missing)"})
@@ -377,7 +380,8 @@ for x in plan[:]:
     data = json.dumps(cur, indent=2).encode("utf-8")
     if before == json.dumps(cur, sort_keys=True) and os.path.isfile(dest):
         data = open(dest, "rb").read()
-        plan.remove(x); skipped.append({"path": x["rel"], "why": "identical on box"})
+        plan.remove(x); identical.append(x)
+        skipped.append({"path": x["rel"], "why": "identical on box"})
     x["data"] = data; x["rewrites"] = 0
     receipts.append({"rel": x["rel"], "destination": dest, "sha256": hashlib.sha256(data).hexdigest()})
 out["receipts"] = receipts
@@ -412,14 +416,25 @@ def ensure_dir(d):
     for x in [dest_root] if d.startswith(dest_root) else []:
         os.chmod(x, 0o700)
 
+def private_mode(item, existing=False):
+    if item["kind"] in ("auth", "merge"): return 0o600
+    mode = os.stat(item["src"]).st_mode
+    if existing: mode |= os.stat(item["dest"]).st_mode
+    return 0o700 if mode & 0o111 else 0o600
+
 if pending_keys:
     try: out["agent_keys"] = post_import.merge_agent_keys(STAGE_ROOT, overwrite=overwrite)
     except post_import.KeyConflict: die("key overwrite approval required", 4)
     except (ValueError, OSError): die("unsafe keys or staging path")
+# Byte equality does not imply private permissions. Only mutate after preflight,
+# never during dry-run; preserve executable ordinary files without rewriting bytes.
+for x in identical:
+    guard_path(x["dest"])
+    os.chmod(x["dest"], private_mode(x, existing=True))
 for x in plan:
     dest = x["dest"]; ensure_dir(os.path.dirname(dest))
     if os.path.exists(dest): backup(dest)
-    atomic_write(dest, x["data"], 0o700 if x["kind"] not in ("auth", "merge") and os.stat(x["src"]).st_mode & 0o111 else 0o600)
+    atomic_write(dest, x["data"], private_mode(x))
     out["installed"].append({"rel": x["rel"], "kind": x["kind"], "dest": dest, "home_rewrites": x["rewrites"]})
 if db_selected:
     # A foreign WAL/SHM must not survive, including after an interrupted replacement.

@@ -459,6 +459,57 @@ exec(compile(sys.stdin.read(), '<apply_import>', 'exec'))
                 self.assertEqual(native.read_bytes(), original)
                 self.assertIn('runtime_repairs_deferred', result['reports'][agent]['warnings'])
 
+    def test_identical_selected_files_become_private_preserving_executable_bits(self):
+        os.environ['OPENAI_API_KEY'] = 'sk-secret-canary'
+        for source_mode, old_mode, expected_mode in ((0o644, 0o644, 0o600), (0o755, 0o755, 0o700),
+                                                      (0o755, 0o644, 0o700), (0o644, 0o700, 0o700)):
+            with self.subTest(source_mode=oct(source_mode), old_mode=oct(old_mode)):
+                op = self.fixture_import('codex', 'AGENTS.md', b'fixture instructions\n')
+                staged = Path(op['transfers'][0]['destination'])
+                staged.chmod(source_mode)
+                target = self.home / '.codex/AGENTS.md'
+                target.parent.mkdir(exist_ok=True)
+                target.write_bytes(self.content)
+                target.chmod(old_mode)
+                before_mtime = target.stat().st_mtime_ns
+                unselected = target.with_name('untouched.txt')
+                unselected.write_bytes(b'unselected')
+                unselected.chmod(0o644)
+                plan, _, guard = IMPORT.helpers(ROOT)
+                operation, state = IMPORT.load_operation(op['operation_id'], guard, plan)
+                rc, _ = IMPORT.call_apply(ROOT, state, operation, 'codex', dry=True)
+                self.assertEqual(rc, 0)
+                self.assertEqual(target.stat().st_mode & 0o777, old_mode)
+                self.assertEqual(self.invoke('advance', op['operation_id'], '--approve-runtime')['phase'], 'applied')
+                self.assertEqual(target.stat().st_mode & 0o777, expected_mode)
+                self.assertEqual(target.read_bytes(), self.content)
+                self.assertEqual(target.stat().st_mtime_ns, before_mtime)
+                self.assertEqual(unselected.stat().st_mode & 0o777, 0o644)
+                self.assertEqual(unselected.read_bytes(), b'unselected')
+                self.assertEqual(list(target.parent.glob('*.bak.*')), [])
+                self.assertEqual(self.invoke('verify', op['operation_id'])['phase'], 'verified')
+
+    def test_unchanged_claude_global_merge_becomes_private(self):
+        os.environ['ANTHROPIC_API_KEY'] = 'sk-secret-canary'
+        source = b'{"mcpServers":{}}'
+        op = self.fixture_import('claude', '_home/.claude.json', source)
+        target = self.home / '.claude.json'
+        original = b'{ "keep": "untouched", "mcpServers": {} }\n'
+        target.write_bytes(original)
+        target.chmod(0o644)
+        before_mtime = target.stat().st_mtime_ns
+        plan, _, guard = IMPORT.helpers(ROOT)
+        operation, state = IMPORT.load_operation(op['operation_id'], guard, plan)
+        rc, _ = IMPORT.call_apply(ROOT, state, operation, 'claude', dry=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(self.invoke('advance', op['operation_id'], '--approve-runtime')['phase'], 'applied')
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(target.read_bytes(), original)
+        self.assertEqual(target.stat().st_mtime_ns, before_mtime)
+        self.assertEqual(list(self.home.glob('.claude.json.bak.*')), [])
+        self.assertEqual(self.invoke('verify', op['operation_id'])['phase'], 'verified')
+
     def test_selected_config_transform_backups_and_sanitized_reports_persist(self):
         op = self.fixture_import('codex', 'config.toml', b'model = "fixture"\nnotify = ["/Applications/old"]\n')
         native = self.home / '.codex/config.toml'
