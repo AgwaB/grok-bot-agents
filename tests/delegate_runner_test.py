@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Offline delegate-task regressions: fake CLIs, clean environment, temporary HOME only."""
 import json
+import os
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -161,6 +164,69 @@ class RunnerTests(unittest.TestCase):
         m = self.run_agent("codex", [], rc=1, stderr="error sending request")
         self.assertEqual(m["error_kind"], "conn_error")
         self.assertIn("error sending request", m["summary"])
+
+    def idle_run(self):
+        r = self.runs / "idle"
+        work = r / "work"
+        work.mkdir(parents=True)
+        p = subprocess.Popen(["timeout", "30", "sleep", "30"], cwd=work, env=self.env,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+        def cleanup():
+            if p.poll() is None:
+                os.killpg(p.pid, signal.SIGTERM)
+            p.wait(timeout=5)
+        self.addCleanup(cleanup)
+        (r / "agent.pid").write_text(str(p.pid))
+        now = int(time.time())
+        for name in ("stdout.log", "stderr.log", "prompt.md"):
+            (r / name).write_text("test\n")
+            os.utime(r / name, (now - 1200, now - 1200))
+        (r / "supervise.samples").write_text(f"{now - 1200} 0 {now - 1200}\n")
+        (r / "supervise.lastcheck").write_text(str(now))
+        return r, p
+
+    def supervise(self, r, *args):
+        return self.command("supervise.sh", r, "60", "--new", "--slice", "0", "--interval", "1", *args)
+
+    def test_silent_thinking_is_advisory_by_default(self):
+        r, p = self.idle_run()
+        proc = self.supervise(r)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("status=running next=continue", proc.stdout)
+        self.assertIn("reason=idle_suspected", proc.stdout)
+        self.assertIn("resumable=0", proc.stdout)
+        self.assertIsNone(p.poll())
+
+    def test_stall_restart_requires_explicit_opt_in(self):
+        r, _ = self.idle_run()
+        proc = self.supervise(r, "--stall-action", "restart")
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("status=stalled", proc.stdout)
+        self.assertIn("resumable=1", proc.stdout)
+
+    def test_recent_session_activity_prevents_stall(self):
+        r, _ = self.idle_run()
+        (r / "sessions").mkdir()
+        (r / "sessions" / "owned.jsonl").write_text("{}\n")
+        proc = self.supervise(r, "--stall-action", "restart")
+        self.assertIn("status=running", proc.stdout)
+        self.assertNotIn("idle_suspected", proc.stdout)
+
+    def test_observation_gap_gives_full_wake_grace_without_dmesg(self):
+        r, _ = self.idle_run()
+        (r / "supervise.lastcheck").write_text(str(int(time.time()) - 900))
+        proc = self.supervise(r, "--stall-action", "restart")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("status=running", proc.stdout)
+        self.assertIn("OBSERVATION_GAP", (r / "supervise.log").read_text())
+
+    def test_cpu_counter_drop_is_not_evidence_of_stall(self):
+        r, _ = self.idle_run()
+        (r / "supervise.samples").write_text(f"{int(time.time()) - 1200} 100000 0\n")
+        proc = self.supervise(r, "--stall-action", "restart")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("status=running", proc.stdout)
 
 
 if __name__ == "__main__":

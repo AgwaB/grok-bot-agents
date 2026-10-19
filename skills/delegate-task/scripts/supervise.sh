@@ -2,12 +2,13 @@
 # Watch one run-agent.sh run for a bounded slice and print ONE machine-readable status line.
 # A supervisor subagent calls this back to back; while it waits in Shell, the box stays awake.
 # Usage:
-#   supervise.sh RUN_ID|RUN_DIR [MAX_SECONDS] [--new] [--slice S] [--interval S] [--stall-min M]
+#   supervise.sh RUN_ID|RUN_DIR [MAX_SECONDS] [--new] [--slice S] [--interval S] [--stall-min M] [--stall-action report|restart]
 #   MAX_SECONDS  this supervisor's whole budget (default 1800 = 30 min), kept in <run-dir>/supervise.deadline
 #   --new        start a fresh budget (the first call of each new supervisor)
 #   --slice S    longest single invocation (default 600; stays under the 780 s Shell call limit)
 #   --interval S seconds between checks (default 30)
-#   --stall-min M  no output growth and no CPU for M minutes = stalled (default 10)
+#   --stall-min M  no log/session writes and little CPU for M minutes = suspected idle (default 10)
+#   --stall-action report|restart  report idle_suspected (default); opt in to resumable stalled
 # Output (stdout, one line):
 #   status=running|done|failed|stalled next=continue|return run_dir=DIR reason=... idle=Ns cpu_delta=Ns forks=N remaining=Ns resumable=0|1
 #   next=continue: call again.  next=return: stop and hand the line back (budget used, or run ended / stalled).
@@ -16,13 +17,14 @@
 # Exit: 0 running|done, 1 failed, 2 stalled, 64 usage error. Details go to <run-dir>/supervise.log.
 set -uo pipefail
 
-ARG="" MAX=1800 NEW=0 SLICE=600 INTERVAL=30 STALL_MIN=10
+ARG="" MAX=1800 NEW=0 SLICE=600 INTERVAL=30 STALL_MIN=10 STALL_ACTION=report
 while [ $# -gt 0 ]; do
   case "$1" in
     --new) NEW=1; shift;;
     --slice) SLICE="$2"; shift 2;;
     --interval) INTERVAL="$2"; shift 2;;
     --stall-min) STALL_MIN="$2"; shift 2;;
+    --stall-action) STALL_ACTION="$2"; shift 2;;
     -h|--help) sed -n '2,16p' "$0"; exit 0;;
     -*) echo "status=failed next=return run_dir= reason=usage:unknown_arg_$1"; exit 64;;
     *) if [ -z "$ARG" ]; then ARG="$1"; else MAX="$1"; fi; shift;;
@@ -32,6 +34,8 @@ done
 for v in "$MAX" "$SLICE" "$INTERVAL" "$STALL_MIN"; do
   case "$v" in ''|*[!0-9]*) echo "status=failed next=return run_dir= reason=usage:not_a_number_$v"; exit 64;; esac
 done
+case "$STALL_ACTION" in report|restart) ;; *) echo "status=failed next=return run_dir= reason=usage:stall_action"; exit 64;; esac
+[ "$INTERVAL" -gt 0 ] && [ "$STALL_MIN" -gt 0 ] || { echo "status=failed next=return run_dir= reason=usage:positive_interval_and_stall_required"; exit 64; }
 [ "$SLICE" -le 720 ] || SLICE=720   # one invocation must fit in a single Shell call
 
 # Same run-dir root as run-agent.sh: $AGENT_RUNS_ROOT > config runs_dir > /workspace/agent-runs.
@@ -124,6 +128,15 @@ echo "$(ts) slice start max=${MAX}s deadline=$(date -d "@$DEADLINE" '+%T') stall
 
 while :; do
   T=$(now); REM=$((DEADLINE - T)); [ "$REM" -lt 0 ] && REM=0
+  # dmesg may be unavailable, and host suspend need not produce a VM-fork message.
+  # A missed observation window is only evidence to grant grace, never evidence of a hang.
+  LAST_CHECK=$(cat "$R/supervise.lastcheck" 2>/dev/null || echo "$T")
+  GAP_LIMIT=$((INTERVAL * 3)); [ "$GAP_LIMIT" -ge 60 ] || GAP_LIMIT=60
+  if [ $((T - LAST_CHECK)) -gt "$GAP_LIMIT" ]; then
+    echo "$(ts) OBSERVATION_GAP $((T - LAST_CHECK))s; resetting idle grace" >> "$LOG"
+    echo "$T" > "$R/supervise.lastwake"
+  fi
+  echo "$T" > "$R/supervise.lastcheck"
   if [ -f "$R/meta.json" ]; then
     # status, or error_kind when set (conn_error = dropped connection/stream, resumable)
     st=$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m.get("error_kind") or m.get("status") or "error")' "$R/meta.json" 2>/dev/null || echo error)
@@ -155,12 +168,16 @@ while :; do
   [ -n "$P" ] && echo "$T $CPU $MT" >> "$SAMPLES"
   # CPU used over the stall window: compare with the newest sample at least STALL seconds old.
   OLD=""; [ -n "$P" ] && OLD=$(awk -v lim=$((T - STALL)) '$1 <= lim {c=$2} END {print c}' "$SAMPLES")
-  if [ -n "$OLD" ]; then CPUD=$(( (CPU - OLD) / 100 )); else CPUD=-1; fi
+  if [ -n "$OLD" ] && [ "$CPU" -ge "$OLD" ]; then CPUD=$(( (CPU - OLD) / 100 )); else CPUD=-1; fi
   echo "$(ts) pid=${P:-none} idle=${IDLE}s cpu=$((CPU / 100))s cpu_delta=${CPUD}s busy_kids=$BUSY forks=$FORKS remaining=${REM}s" >> "$LOG"
-  if [ -n "$P" ] && [ "$IDLE" -ge "$STALL" ] && [ -n "$OLD" ] && [ $((CPU - OLD)) -lt 200 ]; then
-    emit stalled return "no_output_no_cpu_${STALL_MIN}m"
+  REASON=slice_end
+  # Cloud-side reasoning can be silent and use no local CPU. It is not proof of a dead agent.
+  # A shrinking tree CPU counter (children exited) also cannot establish inactivity.
+  if [ -n "$P" ] && [ "$IDLE" -ge "$STALL" ] && [ "$CPUD" -ge 0 ] && [ "$CPUD" -lt 2 ]; then
+    [ "$STALL_ACTION" = restart ] && emit stalled return "no_output_no_cpu_${STALL_MIN}m"
+    REASON=idle_suspected
   fi
   [ "$T" -ge "$DEADLINE" ] && emit running return budget_used
-  [ $((T + INTERVAL)) -gt "$SLICE_END" ] && emit running continue slice_end
+  [ $((T + INTERVAL)) -gt "$SLICE_END" ] && emit running continue "$REASON"
   sleep "$INTERVAL"
 done
