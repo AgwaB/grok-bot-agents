@@ -82,30 +82,24 @@ if [ -d "$OLD_WORKDIR" ]; then
 fi
 
 # --- agent, model, reasoning of the old run ---
-eval "$(python3 - "$R" "$HERE" "$OLD_WORKDIR" <<'PY'
+RECOVERY=$(python3 - "$R" "$HERE" "$OLD_WORKDIR" 2>/dev/null <<'PY'
 import json, os, shlex, sys
+from pathlib import Path
 sys.path.insert(0, sys.argv[2])
 from session_state import session_info
+from run_lifecycle import read_json, recovery_inputs
 r = sys.argv[1]; out = {"AGENT": "", "MODEL": "", "REASONING": "", "PERMISSION": "", "TIMEOUT": "1800"}
-inputs = []
-try:
-    launch = json.load(open(os.path.join(r, "launch.json")))
-    for key in ("AGENT", "MODEL", "REASONING", "PERMISSION"):
-        value = launch.get(key.lower())
-        if isinstance(value, str):
-            out[key] = value
-    timeout = launch.get("timeout_sec")
-    if type(timeout) is int and timeout > 0:
-        out["TIMEOUT"] = str(timeout)
-    inputs = launch.get("inputs") or []
-    if not isinstance(inputs, list) or any(not isinstance(p, str) for p in inputs):
-        inputs = []
-    # A non-repo cwd was an extra readable input, not the isolated workdir.
-    cwd = launch.get("cwd")
-    if isinstance(cwd, str) and cwd and cwd != sys.argv[3] and cwd not in inputs:
-        inputs.append(cwd)
-except Exception:
-    pass
+# New receipts contain the launch-time effective inputs, including a genuinely
+# non-repo cwd. Legacy receipts restore explicit inputs only, never inferred cwd.
+launch = read_json(Path(r) / "launch.json")
+inputs = recovery_inputs(launch)
+for key in ("AGENT", "MODEL", "REASONING", "PERMISSION"):
+    value = launch.get(key.lower())
+    if isinstance(value, str):
+        out[key] = value
+timeout = launch.get("timeout_sec")
+if type(timeout) is int and timeout > 0:
+    out["TIMEOUT"] = str(timeout)
 try:
     m = json.load(open(os.path.join(r, "meta.json")))
     out.update(AGENT=m.get("agent") or out["AGENT"], MODEL=m.get("model") or out["MODEL"], REASONING=m.get("reasoning") or out["REASONING"], PERMISSION=m.get("permission") or out["PERMISSION"])
@@ -137,7 +131,9 @@ out.update(SESSION_ID=session["session_id"] or "", SESSION_FILE=session["session
 print("\n".join(f"{k}={shlex.quote(v)}" for k, v in out.items()))
 print("ORIGINAL_INPUTS=(" + " ".join(shlex.quote(p) for p in inputs) + ")")
 PY
-)"
+); RC=$?
+[ "$RC" = 0 ] || die "invalid_run_metadata" 6
+eval "$RECOVERY"
 [ -n "$AGENT" ] || die "cannot tell which agent ran $OLD_ID; pass -- --agent NAME"
 
 # Reserve only after ownership checks succeed. Reservations are never recycled:
@@ -205,7 +201,14 @@ if [ "$DRY" = 1 ]; then
   exit 0
 fi
 if ! { continuation_brief > "$BRIEF.tmp" && mv "$BRIEF.tmp" "$BRIEF"; }; then die "could not write continuation brief"; fi
-python3 -c 'import json,sys; print(json.dumps({"resumed_from":sys.argv[1],"new_id":sys.argv[2]}))' "$OLD_ID" "$NEW_ID" > "$R/resumed.json"
+# Publish legacy navigation atomically too; reservations remain authoritative.
+python3 - "$HERE" "$R" "$OLD_ID" "$NEW_ID" <<'PY' || die "lifecycle_unavailable" 6
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from run_lifecycle import write_json
+write_json(Path(sys.argv[2]) / "resumed.json", {"resumed_from": sys.argv[3], "new_id": sys.argv[4]})
+PY
 export AGENT_RUNS_ROOT="$ROOT"
 if [ "$NATIVE" = 1 ]; then
   SUMMARY=$("${CMD[@]}"); RC=$?

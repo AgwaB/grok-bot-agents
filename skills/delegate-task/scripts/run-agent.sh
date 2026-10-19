@@ -247,7 +247,7 @@ START=$(date +%s)
 # Private, structured launch inputs survive config changes and truncated logs.
 # A restart must match a reservation made by resume-run.sh; the CLI process must
 # not inherit that internal handoff capability.
-python3 "$(dirname "$0")/run_lifecycle.py" record-launch "$RUN_DIR" "$TIMEOUT" "$AGENT" "$MODEL" "$REASONING" "$PERM" "$CWD" "$PROMPT_FILE" "${INPUTS[@]}" \
+python3 "$(dirname "$0")/run_lifecycle.py" record-launch "$RUN_DIR" "$TIMEOUT" "$AGENT" "$MODEL" "$REASONING" "$PERM" "$CWD" "$PROMPT_FILE" "$KIND" "${#INPUTS[@]}" "${INPUTS[@]}" "${EXTRA[@]}" \
   >/dev/null 2>&1 || die "lifecycle_unavailable"
 # Persist before launch: startup/auth/transport failure may emit no session event at all.
 if [ -n "$RESUME" ]; then

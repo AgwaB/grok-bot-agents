@@ -263,6 +263,86 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("checkpoint before resume", self.git(r / "wt", "log", "-1", "--format=%s"))
         self.assertEqual(self.git(r / "wt", "status", "--porcelain"), "")
 
+    def test_repo_recovery_never_adds_original_checkout_to_inputs(self):
+        repo = self.repo()
+        source = self.root / "explicit input"
+        source.mkdir()
+        m = self.run_agent("codex", self.session_events("codex"),
+                           extra=("--cwd", repo, "--input", source, "--permission", "safe"))
+        launch = json.loads((Path(m["run_dir"]) / "launch.json").read_text())
+        self.assertEqual(launch["kind"], "repo")
+        self.assertEqual(launch["effective_inputs"], [str(source)])
+        for native in (True, False):
+            with self.subTest(native=native):
+                flags = ("--native",) if native else ()
+                p = self.command("resume-run.sh", m["run_dir"], *flags)
+                self.assertEqual(p.returncode, 1, p.stderr)
+                m = json.loads(p.stdout)
+                args = json.loads(Path(self.env["FAKE_ARGS"]).read_text())
+                added = [args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "--add-dir"]
+                self.assertEqual(added, [str(source)])
+                self.assertNotIn(str(repo), added)
+                self.assertNotIn(str(repo), (Path(m["run_dir"]) / "prompt.md").read_text())
+                launch = json.loads((Path(m["run_dir"]) / "launch.json").read_text())
+                self.assertEqual(launch["kind"], "repo")
+                self.assertEqual(launch["effective_inputs"], [str(source)])
+
+    def test_nonrepo_cwd_and_explicit_inputs_survive_recovery_chain(self):
+        source, explicit = self.root / "nonrepo input", self.root / "explicit input"
+        source.mkdir()
+        explicit.mkdir()
+        m = self.run_agent("codex", self.session_events("codex"),
+                           extra=("--cwd", source, "--input", explicit, "--permission", "safe"))
+        launch = json.loads((Path(m["run_dir"]) / "launch.json").read_text())
+        self.assertEqual(launch["kind"], "work")
+        self.assertEqual(launch["inputs"], [str(explicit)])
+        self.assertEqual(launch["effective_inputs"], [str(source), str(explicit)])
+        for native in (True, False):
+            p = self.command("resume-run.sh", m["run_dir"], *(("--native",) if native else ()))
+            self.assertEqual(p.returncode, 1, p.stderr)
+            m = json.loads(p.stdout)
+            args = json.loads(Path(self.env["FAKE_ARGS"]).read_text())
+            added = [args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "--add-dir"]
+            self.assertIn(str(source), added)
+            self.assertIn(str(explicit), added)
+            launch = json.loads((Path(m["run_dir"]) / "launch.json").read_text())
+            self.assertEqual(launch["kind"], "work")
+            self.assertIn(str(source), launch["effective_inputs"])
+
+    def test_legacy_launch_restores_explicit_inputs_but_never_guesses_cwd(self):
+        repo, explicit = self.repo(), self.root / "explicit"
+        explicit.mkdir()
+        nonrepo = self.root / "nonrepo"
+        nonrepo.mkdir()
+        for cwd in (repo, nonrepo):
+            with self.subTest(cwd=cwd):
+                m = self.run_agent("codex", self.session_events("codex"),
+                                   extra=("--cwd", cwd, "--input", explicit, "--permission", "safe"))
+                run = Path(m["run_dir"])
+                launch = json.loads((run / "launch.json").read_text())
+                launch["schema"] = 1
+                del launch["kind"], launch["effective_inputs"]
+                (run / "launch.json").write_text(json.dumps(launch))
+                p = self.command("resume-run.sh", run, "--native")
+                self.assertEqual(p.returncode, 1, p.stderr)
+                args = json.loads(Path(self.env["FAKE_ARGS"]).read_text())
+                added = [args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "--add-dir"]
+                self.assertEqual(added, [str(explicit)])
+                self.assertNotIn(str(cwd), added)
+
+    def test_corrupt_effective_inputs_fail_closed_before_reservation(self):
+        m = self.run_agent("codex", self.session_events("codex"))
+        run = Path(m["run_dir"])
+        launch = json.loads((run / "launch.json").read_text())
+        launch["effective_inputs"] = "not-an-input-list"
+        (run / "launch.json").write_text(json.dumps(launch))
+        calls = Path(self.env["FAKE_ARGS"] + ".calls").read_bytes()
+        p = self.command("resume-run.sh", run)
+        self.assertEqual(p.returncode, 6, p.stderr)
+        self.assertEqual(json.loads(p.stdout)["error"], "invalid_run_metadata")
+        self.assertEqual(Path(self.env["FAKE_ARGS"] + ".calls").read_bytes(), calls)
+        self.assertFalse((run / "lineage.json").exists())
+
     def test_rate_limit_cleanup_preserves_agent_commits(self):
         repo = self.repo()
         self.env.update(FAKE_TOUCH="1", FAKE_COMMIT="1")
