@@ -239,6 +239,8 @@ def omp_creds(d):
 
 omp_auth = None
 DB = ("agent.db", "agent.db-wal", "agent.db-shm")  # one unit: logins may sit only in the WAL
+if cli == "omp" and any(n in staged_rels for n in DB[1:]) and "agent.db" not in staged_rels:
+    die("omp database sidecars require agent.db")
 db_changed = cli == "omp" and any(x["rel"] in DB for x in plan)
 if db_changed:
     try:

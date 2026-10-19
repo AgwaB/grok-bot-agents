@@ -345,7 +345,7 @@ def handle(args, root):
             return result('error', 'whole_file_selection_required')
         files = [f for f in rows if f['id'] in selected]
         db = {f['id'] for f in rows if f['agent'] == 'omp' and f['rel'].startswith('agent.db')}
-        if db & set(selected) and not db <= set(selected):
+        if db & set(selected) and ('omp:agent.db' not in db or not db <= set(selected)):
             return result('error', 'whole_database_selection_required')
         ident = 'import-' + uuid.uuid4().hex
         operation = state_root() / ident

@@ -133,6 +133,29 @@ class ImportController(unittest.TestCase):
         self.selection.write_text(json.dumps(['omp:agent.db']))
         self.assertEqual(self.plan()['reason'], 'whole_database_selection_required')
 
+    def test_sidecars_without_database_are_rejected(self):
+        for rels in (('agent.db-wal',), ('agent.db-shm',), ('agent.db-wal', 'agent.db-shm')):
+            with self.subTest(rels=rels):
+                self.files = [{'agent': 'omp', 'rel': rel, 'sha256': '0' * 64} for rel in rels]
+                self.write_inventory()
+                self.selection.write_text(json.dumps(['omp:' + rel for rel in rels]))
+                self.assertEqual(self.plan()['reason'], 'whole_database_selection_required')
+        self.assertFalse((self.home / '.grok-bot-agents').exists())
+
+    def test_legacy_apply_refuses_orphan_sidecar(self):
+        stage = self.home / 'stage/omp'
+        stage.mkdir(parents=True)
+        (stage / 'agent.db-wal').write_bytes(b'foreign sidecar')
+        db = self.home / '.omp/agent/agent.db'
+        db.parent.mkdir(parents=True)
+        db.write_bytes(b'original database')
+        p = subprocess.run(['bash', str(ROOT / 'skills/import-agents/scripts/apply_import.sh'),
+                            'omp', '--overwrite', '--no-verify'],
+                           env=dict(os.environ, AGENT_IMPORT_STAGE=str(stage.parent)), capture_output=True)
+        self.assertEqual(p.returncode, 2)
+        self.assertEqual(db.read_bytes(), b'original database')
+        self.assertFalse(db.with_name('agent.db-wal').exists())
+
     def test_rejects_forbidden_paths(self):
         for rel in ('../.ssh/id_rsa', 'skills/.aws/key', 'auth.json/provider-a', 'sessions/log.json'):
             with self.subTest(rel=rel):
