@@ -4,6 +4,21 @@
 
 First release.
 
+- Fix all four round-2 gba CLI review findings (version remains **0.1.0**):
+  - Pin live verification to the exact integrity-checked absolute executable, including startup
+    probes; the runner never rediscovers a different agent through an off-PATH npm prefix.
+  - Reconcile selected omp DB/WAL/SHM groups even when files match. Persist omitted-sidecar absence
+    independently of current existence and never weaken it on retry; retain overwrite consent/backups.
+  - Normalize permissions on byte-identical selected files and unchanged Claude global merges during
+    real apply, preserving ordinary executable files and leaving dry-run/unselected files untouched.
+  - Inventory Claude global state with the same `claude_global()` / `CLAUDE_CONFIG_DIR` rule as apply,
+    never substituting the default profile when the configured profile lacks global state.
+  - Add **7 regression methods**, including SIGKILL between DB replacement and sidecar cleanup.
+    **237 Python tests / 236 passed / 1 optional PowerShell skip**; standalone delegate **66 passed**,
+    import matrix **59 passed / 1 skip**, auth **26** and Pi retry **26** checks passed.
+    Full ShellCheck, Bash syntax, compilation and changed-file LSP error probes pass.
+    See `TESTING.md` for exact commands, the per-finding test map and native/live gaps.
+
 - Fix all eight major gba CLI review findings (still **0.1.0**):
   - Key replacements, including differing duplicate assignments, require explicit overwrite approval
     and a private backup; legacy direct apply follows the same rule.

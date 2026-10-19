@@ -157,6 +157,9 @@ Python **3.11+ 표준 라이브러리만** 사용합니다. 각 SKILL.md의 실�
   플러그인 메타데이터/npm overlay는 별도로 전체 범위를 승인한 legacy 경로가 필요합니다.
   중단 후 `--retry-interrupted`도 살아 있는 helper가 있으면 차단하며, timeout/종료 신호는 프로세스 그룹을 정리합니다.
   각 파일의 변환 결과와 선택한 키 값을 비공개로 대조한 뒤에만 staging을 삭제합니다.
+  omp DB 바이트가 같아도 그룹 전체를 조정하며, 선택에 없는 WAL/SHM의 부재 조건은 재시도해도 유지합니다.
+  실제 apply는 내용이 같은 선택 파일도 0600(일반 실행 파일은 0700)으로 맞추며, dry-run은 권한을 바꾸지 않습니다.
+  Claude 전역 상태의 inventory/merge는 모두 설정된 `$CLAUDE_CONFIG_DIR/.claude.json`, 아니면 `~/.claude.json`을 사용합니다.
 - `runs list --open`, `runs next ID`, `runs recover ID`: 원래 입력/시간 제한, 계보/시도 횟수,
   감시 봇 인계를 저장합니다. **계보 전체 자동 재시작 2회** 이후에는 사용자 동의와
   `--allow-extra-restart`가 필요합니다. 중단된 사용자 지정 ID도 예약 원장으로 계보를 유지합니다.
@@ -167,6 +170,7 @@ Python **3.11+ 표준 라이브러리만** 사용합니다. 각 SKILL.md의 실�
   출력 캡처는 격리가 아니므로 HOME 접근·파일 생성·네트워크 부작용이 있을 수 있습니다.
   `verify --live`만 실제 제공자 호출을 하며 버전 검사를 자동 활성화하지 않습니다. quota 부족은 성공이 아닙니다.
   두 실행 경로 모두 먼저 관리형 wrapper/payload 무결성을 확인하며 변조·불완전 설치는 실행을 막습니다.
+  live 검증은 확인한 절대 실행 경로를 시작 검사와 요청에 그대로 사용하며, npm prefix의 다른 CLI로 바뀌지 않습니다.
   정적 omp 검사는 DB 복사/쓰기를 피하려고 WAL 상태 확인을 보류하고 degraded parity로 표시합니다.
 
 출력은 `schema:1`, `status:ok|blocked|error`, 고정 `reason`, `next_action`, `requires_approval`,

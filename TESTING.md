@@ -1,6 +1,6 @@
 # Testing
 
-## gba CLI review fixes (0.1.0, 2026-10-19)
+## gba CLI round-2 review fixes (0.1.0, 2026-10-19)
 
 All new test evidence is **offline**. No real credentials, provider calls, package downloads, global
 installs, releases or external writes. Python fixtures use temporary HOME/config/run roots and
@@ -10,6 +10,7 @@ live results farther below were **not repeated** and do not certify this new CLI
 Run from the repository root (Python 3.11+, Bash, Git, Node and ShellCheck already installed):
 
 ```bash
+set -e
 h=$(mktemp -d); trap 'rm -rf "$h"' EXIT
 SC_DIR=$(dirname "$(command -v shellcheck)")
 env -i HOME="$h" PATH=/usr/bin:/bin LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 \
@@ -17,33 +18,34 @@ env -i HOME="$h" PATH=/usr/bin:/bin LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 \
 env -i HOME="$h" PATH="$SC_DIR:/usr/bin:/bin" PYTHONDONTWRITEBYTECODE=1 \
   bash tests/run_import_tests.sh
 env -i HOME="$h" PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 \
+  python3 tests/delegate_runner_test.py
+env -i HOME="$h" PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 \
   bash tests/delegate_pi_retry_test.sh
-shellcheck -x skills/*/scripts/*.sh tests/*.sh
-for f in skills/*/scripts/*.sh tests/*.sh; do bash -n "$f"; done
-python3 -X "pycache_prefix=$h/cache" -m py_compile scripts/gba scripts/*.py skills/*/scripts/*.py tests/*.py
+env -i HOME="$h" PATH="$SC_DIR:/usr/bin:/bin" shellcheck -x skills/*/scripts/*.sh tests/*.sh
+for f in skills/*/scripts/*.sh tests/*.sh; do env -i HOME="$h" PATH=/usr/bin:/bin bash -n "$f"; done
+env -i HOME="$h" PATH=/usr/bin:/bin python3 -X "pycache_prefix=$h/cache" \
+  -m py_compile scripts/gba scripts/*.py skills/*/scripts/*.py tests/*.py
 git diff --check
 ```
 
 Latest results:
 
-- **230 Python tests run: 229 passed, 1 skipped** (PowerShell unavailable). This includes
-  **66 delegate + 60 import-matrix methods** and 104 CLI/config/contract methods; **33 added** in this review fix.
+- **237 Python tests run: 236 passed, 1 skipped** (PowerShell unavailable). This includes
+  **66 delegate + 60 import-matrix methods** and 111 CLI/config/contract methods; **7 added** in round 2.
+  All seven new methods reproduced the original failure paths before their fixes.
 - `tests/run_import_tests.sh`: **60 tests / 59 passed / 1 skipped**, plus **26 auth Bash checks**;
   embedded-scanner parity, syntax, import ShellCheck and Python compilation passed.
 - Standalone `python3 tests/delegate_runner_test.py`: **66 tests passed**.
 - `tests/delegate_pi_retry_test.sh`: **26 checks passed**.
 - Full `shellcheck -x skills/*/scripts/*.sh tests/*.sh`, Bash syntax, full compilation and
   `git diff --check`: **passed**; plugin version remains **0.1.0**.
-- The first full run exposed an obsolete legacy key-overwrite expectation and local harness ignore
-  interference. The key test now requires consent/backups; the ignore test uses an isolated Git repo.
-  The complete discovery, import runner, Pi retry, syntax, ShellCheck and compile commands then passed.
-- Active LSP error probes covered 12 changed Python files with no unsuppressed errors. Dispositioned
-  findings are not claimed clean; CLI subprocess integration and compilation test actual resolution.
-  Mechanical helper style/file-handle cleanup is isolated from safety fixes; legacy import regressions
-  remain green. Guarded-I/O/valid-mode rule false positives were recorded without production ignores.
+- Active LSP error probes covered all **6 changed Python/shell files**: zero diagnostics, no unavailable
+  or inconclusive outcomes. No suppressions were added. No `.pi/` run state is tracked.
+- Five SKILL.md files remain **334 lines before/after** (66 bridge, 59 configure, 69 delegate,
+  72 import, 68 setup); no skill contract or version change was needed.
 
-Current methods: config safety **5**, import controller **30**, setup **19**, run lifecycle **20**,
-shared doctor **18**, CLI integration **7**, skill/webhook contracts **5**. Tests cover:
+Current methods: config safety **5**, import controller **36**, setup **19**, run lifecycle **20**,
+shared doctor **19**, CLI integration **7**, skill/webhook contracts **5**. Tests cover:
 
 - Write-free planning including bytecode, standalone incomplete-plugin refusal, arbitrary cwd,
   stable JSON/exit codes, argument/parser errors and both-output-stream secret canaries.
@@ -60,7 +62,20 @@ shared doctor **18**, CLI integration **7**, skill/webhook contracts **5**. Test
   config secrets rejected recursively, router JSON/bulk semantics, Pi `max`, and webhook command
   payloads staying data-only.
 
-### Review regression map
+### Round-2 regression map
+
+| Finding | Fix and regression methods |
+| --- | --- |
+| 1 — live executable identity | Pass the integrity-checked absolute wrapper through `--executable`; use it for all four agents and Pi's startup `--help`, without npm-prefix discovery. `gba_doctor_test.py`: `test_live_uses_checked_executable_not_off_path_npm_prefix` uses the real runner with managed/fake shadow CLIs under an initially off-PATH, space-containing npm prefix. |
+| 2 — omp group reconciliation | Reconcile selected DB groups even when bytes match. Derive omitted-sidecar absence from selection, independent of existence, and retain prior expectations on retry. `gba_import_test.py`: `test_identical_database_reconciles_stale_sidecars`, `test_database_absence_receipts_cover_sidecars_missing_at_preflight`, `test_database_retry_after_replace_before_sidecar_removal`. The last SIGKILLs the real helper immediately after atomic DB replacement, then also loses completion after cleanup; stale WAL/SHM cannot pass verification, and overwrite approval/private backups remain required. |
+| 3 — identical-file permissions | Normalize selected identical files only during real apply; ordinary executable files retain owner execution, auth/global merges remain 0600. `gba_import_test.py`: `test_identical_selected_files_become_private_preserving_executable_bits`, `test_unchanged_claude_global_merge_becomes_private`. Cover 0644/0755/source executable modes, unchanged bytes/mtime, write-free dry-run, untouched unselected files, no unnecessary backups, and successful real offline verification. |
+| 4 — Claude profile inventory | Source global state uses the same `claude_global()` resolution as apply. `gba_import_test.py`: `test_claude_global_inventory_honors_config_dir_without_default_fallback` covers simultaneous different default/override files, unset/empty overrides, hashes/consent paths, write-free inventory and no fallback when the overridden file is absent. |
+
+The new DB interruption fixtures use synthetic bytes to isolate reconciliation/receipt behavior;
+existing import-matrix tests additionally cover SQLite WAL snapshots, disabled/corrupt logins and
+sidecar symlinks. This is not certification of concurrent native SQLite writers.
+
+### First-round regression map
 
 | Finding | Fix and representative regression |
 | --- | --- |

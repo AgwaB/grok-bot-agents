@@ -180,8 +180,9 @@ Default diagnostics leave versions `null` with `version_status:not_requested` (r
 this is not a verification failure. Obtain runtime-use approval before `--probe-versions`: output capture is
 not a sandbox, and a binary can access HOME or cause side effects. `--live` does not imply version probes.
 Managed wrapper and payload integrity is checked before either opted-in execution; changed/incomplete
-managed installs block execution. Static omp auth inspection defers WAL-backed status rather than copying
-or opening a writable database; this is reported as a degraded parity check.
+managed installs block execution. Live verification pins that absolute executable for startup probes and
+the agent request; the runner cannot substitute an off-PATH npm-prefix agent. Static omp auth inspection
+defers WAL-backed status rather than copying or opening a writable database; this is a degraded parity check.
 
 Installer downloads use HTTPS plus Node SHA256 manifests and npm registry SHA512 integrity; npm checks
 dependency integrity, lifecycle scripts are disabled. User-local wrappers keep the required Node/Bun on PATH.
@@ -216,6 +217,11 @@ or dependency installers; it imports selected files with deterministic home/key-
 Runtime repairs are deferred in sanitized `reports` instead of rewriting unselected settings. Plugin metadata,
 npm overlays and external Pi `_home` manifests require a separately reviewed full-consent legacy operation.
 File/key replacements and stale destination omp sidecar removal require `--overwrite`, with private backups.
+Selected omp groups are reconciled even when the DB bytes match; omitted WAL/SHM must remain absent,
+including after retries. Real apply also makes byte-identical selected files private (0600, or 0700 for
+ordinary executable files), without rewriting their contents; dry-run leaves permissions untouched.
+Claude global inventory and merge both use `$CLAUDE_CONFIG_DIR/.claude.json` when configured, otherwise
+`~/.claude.json`; they do not silently substitute another profile.
 Warnings and backup paths persist in `status`/`verify`; secret values and private verification hashes do not.
 An interrupted helper leaves phase `applying`; inspect effects and explicitly use `--retry-interrupted`.
 Helper process-group ownership is recorded before execution. Live writers block all controller imports;
