@@ -16,7 +16,7 @@ Grok Bot 박스(클라우드 컴퓨터)에서 **Claude Code · Codex CLI · Pi �
    - 2-2: 카드 하나로 **내 컴퓨터에서 전부 가져오기 (추천)** 또는 **에이전트별로 고르기**를 고릅니다. 가져오기는 허용 목록만 묶은 tar 하나를 복사합니다(승인 4~5번 정도). 설정, 동의 카드(이름만 표시)에서 고른 API 키(`~/.agent-keys`, 600), Pi/omp 로그인이 옮겨집니다. Claude Code와 Codex 구독 로그인은 기본으로 박스에서 따로 로그인하고, 복사는 옵션입니다. 키와 토큰은 **채팅에 절대 쓰지 않습니다**.
    - 2-3: 기본 모델과 추론 레벨은 **native**(플래그를 넘기지 않음)여서 각 CLI의 자체 설정이나 가져온 설정을 그대로 씁니다. 가져온 경우엔 이 카드를 건너뜁니다. 그다음 중앙 config를 쓰고, CLI마다 OK 테스트를 돌립니다.
 3. **명시적 지시** (`/delegate-task`): 지목한 CLI로 바로 실행합니다. 일이 가벼워도 지목이 우선입니다.
-4. **자동 라우팅**: 가벼운 일은 봇이 직접 하고, 무거운 일만 활성화된 CLI에 맡깁니다. 반복·대량 작업은 Pi/omp 저가 모델, 어려운 추론·코드는 Claude/Codex, 장시간 무인 작업은 omp, 리뷰는 만들지 않은 쪽 에이전트가 맡습니다. 쓸 수 있는 CLI가 적으면 폴백 규칙을 따릅니다.
+4. **자동 라우팅**: 가벼운 일은 봇이 직접 하고, 무거운 일만 활성화된 CLI에 맡깁니다. 반복·대량 작업은 Pi/omp 저가 모델, 어려운 추론·코드는 Claude/Codex, 장시간 무인 작업은 omp, 리뷰는 만들지 않은 쪽 에이전트가 맡습니다. 10분 넘는 실행은 감시 봇이 30분씩 교대로 지켜봐서 박스가 잠들지 않게 하고, 멈추면 이어서 다시 돌립니다. 쓸 수 있는 CLI가 적으면 폴백 규칙을 따릅니다.
 5. **설정 변경** (`/configure-agents`): 모델, 추론 레벨, 권한 모드, 라우팅, 로그인/키 교체, 각 CLI의 native config를 바꿉니다.
 
 ## 구조
@@ -39,6 +39,8 @@ grok-bot-agents/
     │   ├── scripts/run-agent.sh            # config 기반 헤드리스 실행기 (인자로 덮어쓰기)
     │   ├── scripts/route.py                # 자동 라우팅 + rate limit 상태
     │   ├── scripts/summarize_run.py
+    │   ├── scripts/supervise.sh            # 장시간 실행 감시 (감시 봇 30분 교대, 박스 유휴 정지 대비)
+    │   ├── scripts/resume-run.sh           # 멈춘 실행: 진행분 커밋 후 이어서 재실행
     │   └── references/{codex,claude-code,pi,omp}.md
     └── agent-bridge-webhook/
         ├── SKILL.md

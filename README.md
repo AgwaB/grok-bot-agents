@@ -20,7 +20,7 @@ artifact paths.
 | `setup-agents` | Detect the CLIs already set up on your computer, pick CLIs (multi-select), install only those, import them all by default (settings, consented API keys, Pi/omp logins; Claude Code and Codex log in on the box unless you opt in to copying), or sign in per agent (subscription takeover, API key via masked input), keep model/reasoning native, write the config, run an OK test per CLI |
 | `import-agents` | Copy existing CLI settings, consented API keys and logins from your registered computer (macOS, Linux; Windows works but is less tested) to the box as one allowlisted bundle (or file by file), with your approval for each copy |
 | `configure-agents` | Change models, reasoning, permission mode, routing, logins/keys and each CLI's native config |
-| `delegate-task` | Decide light vs heavy, route to a CLI (or the one you named), write a standalone brief, run it headless, report back. Includes read-only code review |
+| `delegate-task` | Decide light vs heavy, route to a CLI (or the one you named), write a standalone brief, run it headless, report back. Includes read-only code review, and supervisors that keep long runs alive through box idle pauses |
 | `agent-bridge-webhook` | Two-way handoff with agents on another machine or CI through a webhook routine; answers stream back to the caller's terminal over Tailscale (`grok-send-task --wait`), with sanitizing in both directions |
 
 ## Flow
@@ -144,7 +144,7 @@ skills/
   setup-agents/SKILL.md
   import-agents/       SKILL.md, scripts/{import_plan.py, detect_local.sh, bundle_local.sh, stage_tar.py, apply_import.sh}
   configure-agents/    SKILL.md, scripts/agents_config.py
-  delegate-task/       SKILL.md, scripts/{run-agent.sh, route.py, summarize_run.py}, references/
+  delegate-task/       SKILL.md, scripts/{run-agent.sh, route.py, summarize_run.py, supervise.sh, resume-run.sh}, references/
   agent-bridge-webhook/ SKILL.md, scripts/{bridge.py, bridge_server.py, bridge-serve.sh, setup-tailscale.sh, sanitize_result.py, send-task.sh, bridge.env.example}
 ```
 

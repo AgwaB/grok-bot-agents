@@ -177,7 +177,11 @@ esac
 printf '%q ' "${CMD[@]:0:${#CMD[@]}-1}" > "$RUN_DIR/cmd.txt"; echo '<prompt.md>' >> "$RUN_DIR/cmd.txt"
 
 START=$(date +%s)
-( cd "$WORKDIR" && timeout --kill-after=30 "$TIMEOUT" "${CMD[@]}" ) >"$RUN_DIR/stdout.log" 2>>"$RUN_DIR/stderr.log" </dev/null
+# agent.pid / runner.pid let supervise.sh find the process tree (stall checks, restart after a VM pause).
+( cd "$WORKDIR" && exec timeout --kill-after=30 "$TIMEOUT" "${CMD[@]}" ) >"$RUN_DIR/stdout.log" 2>>"$RUN_DIR/stderr.log" </dev/null &
+AGENT_PID=$!
+echo "$AGENT_PID" > "$RUN_DIR/agent.pid"; echo "$$" > "$RUN_DIR/runner.pid"
+wait "$AGENT_PID"
 RC=$?
 END=$(date +%s)
 

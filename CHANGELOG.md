@@ -4,6 +4,12 @@
 
 First release.
 
+- Long delegated runs survive box idle pauses (still **0.1.0**): `delegate-task` adds
+  `scripts/supervise.sh` (bounded watch slices, one status line: running, done, failed or
+  stalled) for supervisor subagents rotated every 30 minutes, and `scripts/resume-run.sh`
+  (commit WIP on `agent/<id>`, relaunch with a continuation brief). `run-agent.sh` writes
+  `agent.pid`/`runner.pid`. New "Known limits" section: idle VM pauses, a suspected ~1 hour
+  subagent cap.
 - Windows import is supported but less tested than macOS/Linux; the docs and the
   import flow now say it may not go smoothly and point to box login as the fallback.
 - Import regression coverage (still **0.1.0**): research on eight open-source

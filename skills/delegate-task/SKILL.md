@@ -144,7 +144,41 @@ For anything longer than a quick check, run it in the background so you get a co
 - Every time you wake (any background notice, a user message, a subagent result), first check open runs:
   `ls -t /workspace/agent-runs | head` and read `meta.json` / `result.md` of any run that finished since.
   A notice can arrive while you are busy with something else, so don't rely on it alone.
-- Don't add a separate `while kill -0 ...; sleep` waiter. If you lost track of a run, check its `meta.json`.
+- Don't add your own `while kill -0 ...; sleep` waiter. If you lost track of a run, check its `meta.json`.
+  For long runs, use the supervisor below instead.
+
+### Long runs (over about 10 minutes): rotate supervisors
+
+The box pauses when no bot turn or subagent is active, and a paused run's model stream dies (see Known
+limits). A subagent that waits in Shell keeps the box awake, so long runs get a supervisor subagent:
+
+1. Start the run in the background as above, with `--id <id>`.
+2. Dispatch a supervisor subagent with this brief: "Run `bash <skill>/scripts/supervise.sh <id> 1800 --new`,
+   then keep running `bash <skill>/scripts/supervise.sh <id>` back to back (each call blocks up to 10 minutes;
+   use a Shell wait of about 11 minutes) until a line says `next=return`. Return that last line only. Don't do
+   anything else." `<skill>` is this skill's folder as an absolute path; the subagent can't see this file.
+3. The supervisor ends after at most 30 minutes, which wakes you. Read its line:
+
+| `status` | Do this |
+|---|---|
+| `running` (`reason=budget_used`) | dispatch the next supervisor right away, same brief |
+| `done` / `failed` | the run ended: read `meta.json` and report (section 5). `reason=died_no_meta` means it died without a summary, usually a box pause or restart: restart it |
+| `stalled` | no output and no CPU for 10 minutes: restart it |
+
+Restart a stalled or died run with `resume-run.sh`. Start it as a background Shell command, like `run-agent.sh`:
+
+```bash
+bash scripts/resume-run.sh <id> --kill [-- --timeout 7200]   # --dry-run shows the plan first
+```
+
+It stops what is left of the old process tree, commits the work in progress on `agent/<id>`, and starts a
+new run `<id>-r2` (then `-r3`, ...) from that worktree. The new run uses the same agent, model and reasoning
+and the original brief plus a continuation note ("check what is done, don't start over"). Then supervise
+the new id. After 2 restarts of the same task, stop and tell the user.
+
+`supervise.sh` line: `status=running|done|failed|stalled next=continue|return run_dir=DIR reason=... idle=Ns
+cpu_delta=Ns forks=N remaining=Ns`. Details go to `<run-dir>/supervise.log`. Options: `--slice S` (one call,
+default 600), `--interval S` (30), `--stall-min M` (10).
 
 ## 5. Report back
 
@@ -152,6 +186,17 @@ For anything longer than a quick check, run it in the background so you get a co
 - Want to share a file? Send it from `artifacts`. Don't paste long content.
 - `error` / `timeout`: read `stderr_tail`, fix it (auth, model id, deps) or switch worker. At most 2 retries.
 - Continue a session with `--resume <session_id>`.
+
+## Known limits
+
+- **The box pauses when idle.** A few minutes after no bot turn or subagent is active, the box VM pauses,
+  even between chat turns. Paused processes freeze, model streams time out, and the CLI hangs after it
+  wakes (`dmesg` shows `crng reseeded due to virtual machine fork` at each resume). Background runs alone
+  don't keep it awake. See the [forum thread](https://forum.cursor.com/t/grok-bot-computer-freezes-reboots-repeatedly-and-kills-24-7-background-scripts/174272).
+- **Subagents seem to have a run cap of about 1 hour** (observed, not documented). One subagent kept the box
+  awake for 57 minutes, then was interrupted and the box restarted. Hence the 30-minute supervisor rotation.
+- A box restart kills every run. `supervise.sh` then reports `failed reason=died_no_meta`; restart with
+  `resume-run.sh`. Only committed or saved work survives in the worktree.
 
 ## Always ask first
 Full auto covers what happens **inside** the run. These still need the user's OK every time:
