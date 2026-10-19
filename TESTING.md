@@ -1,5 +1,55 @@
 # Testing
 
+## Offline delegate runner regressions (0.1.0)
+
+Run from the repository root on Linux with Bash, Python 3, Git and GNU utilities:
+
+```bash
+python3 tests/delegate_runner_test.py
+env -i PATH=/usr/bin:/bin bash tests/delegate_pi_retry_test.sh
+/home/box/.local/bin/shellcheck skills/delegate-task/scripts/{run-agent,supervise,resume-run}.sh
+bash -n skills/delegate-task/scripts/run-agent.sh
+bash -n skills/delegate-task/scripts/supervise.sh
+bash -n skills/delegate-task/scripts/resume-run.sh
+```
+
+The absolute ShellCheck path above is this box's installed binary; elsewhere use your
+installed `shellcheck`. No CLI download, provider call or real credential/config home
+is needed. The Python suite creates a clean environment, temporary HOME/run roots,
+fake versions of **all four CLIs** and npm, and disposable Git repositories. The
+existing Bash suite is launched with an empty environment to exclude config overrides.
+
+Latest hardening evidence: **31 Python tests passed**, **26 existing Bash checks
+passed**, ShellCheck **zero diagnostics** on all three changed shell scripts; shell
+syntax, temporary-cache Python compilation and `git diff --check` passed. Active LSP
+checks found no errors; numeric-conversion advisories in `summarize_run.py` were
+reviewed as shell-generated exit-code/elapsed-time inputs, not untrusted model text;
+a dynamic-regex advisory is a false positive on the fixed `AUTH_RE` literal.
+Version remains **0.1.0**. Coverage includes:
+
+- omp/Pi zero-exit errors; every reported transport phrase; retry recovery/exhaustion;
+  auth/quota separation (including WebSocket 401/403); cancelled/aborted turns
+  are not auto-retried; truncated turns fail; Unicode JSONL and malformed noise.
+- Codex `turn.failed` over stale/empty result files, completed retries, missing terminal
+  records; Claude legacy JSON and streamed result with `success + is_error: true`.
+- Real GNU timeout around a fake CLI; stream flags; silent-thinking advisory versus
+  opt-in stall restart, owned session activity, observation-gap grace, shrinking CPU
+  counters and a stale PID pointing at another run's live timeout.
+- Exclusive/private run IDs and traversal rejection; permission recovery with/without
+  metadata; write-free dry-run; absolute run-root preservation; WIP checkpoint/resume
+  in a new worktree; rate-limit cleanup preserving new commits and ignored artifacts.
+
+Before fixes, the first 12 parser tests exposed 28 failing subcases; the five supervision
+regressions failed; recovery/cleanup regressions reproduced permission expansion,
+run-ID overwrite and deletion of agent commits. Supplied freeze-test2 failure logs
+were also replayed through `summarize_run.py` in a temporary HOME: Codex (recorded rc 1),
+Claude and omp (forced rc 0 to test exit dishonesty) all yielded nonempty summaries,
+`error/conn_error/resumable=true`. No live agent, network-kill or actual suspend test
+was rerun; old logs are historical evidence, not new provider/platform certification.
+Global scheduling, simultaneous resumes, reboot/start-time PID fencing, native session
+migration, hostile filesystem races and macOS/Windows supervision remain untested.
+See [research and decisions](docs/research/agent-runners.md).
+
 ## Offline import regression suite (run from the repo root)
 
 Prerequisites: Python 3.11+, Node, Bash, POSIX utilities and ShellCheck already on PATH.
@@ -81,7 +131,7 @@ separate approval and are outside this test run.
 | Area | How |
 |---|---|
 | Router | `ROUTE_NOW=… GROK_BOT_AGENTS_STATE=/tmp/s.json python3 skills/delegate-task/scripts/route.py decide …`: light → `self`; bulk → pi; long → omp; hard → claude; review of codex → claude. With claude marked limited: hard → codex, review of codex → pi, `--named claude` → `none`/`ask`. The limit expires at the reset time. pi disabled → omp. `fixed` mode is honored |
-| Supervisor | mktemp `HOME` + `AGENT_RUNS_ROOT`, fake `pi` on `PATH`: `supervise.sh` reports `done` (meta ok), `failed` (meta timeout; no process and no meta → `died_no_meta`; stale `agent.pid`), `running next=continue` at slice end, `running next=return` when the budget is used, `stalled` for a hung run (`--stall-min 1`), never for a run that keeps writing. `resume-run.sh`: refuses a live run without `--kill` and a finished-ok run; `--dry-run` changes nothing; a real resume kills the tree, commits WIP on `agent/<id>`, relaunches `<id>-r2` from that worktree with the same agent, and numbers the next one `-r3` |
+| Supervisor | mktemp `HOME` + `AGENT_RUNS_ROOT`, fake `pi` on `PATH`: `supervise.sh` reports `done` (meta ok), `failed` (meta timeout; no process and no meta → `died_no_meta`; stale `agent.pid`), `running next=continue` at slice end, `running next=return` when the budget is used, `running reason=idle_suspected` for a silent run; `stalled` only with `--stall-min 1 --stall-action restart`, never for a run that keeps writing. `resume-run.sh`: refuses a live run without `--kill` and a finished-ok run; `--dry-run` changes nothing; a real resume kills the tree, commits WIP on `agent/<id>`, relaunches `<id>-r2` from that worktree with the same agent, and numbers the next one `-r3` |
 | Pi retry + connection errors | `tests/delegate_pi_retry_test.sh`: mktemp `HOME` + `AGENT_RUNS_ROOT`, fake `pi` on `PATH`, 26 checks: a repo run gets `--approve` and a work-dir `.pi/settings.json` of only `{"retry":{"enabled":true}}`, both files stay out of `git status` and are removed afterwards (`pi_retry: on`); `~/.pi/agent/settings.json` is byte-identical; an existing project `.pi/settings.json`, a project or parent `.agents/skills`, or `--review` means no file and no `--approve`; a bare tracked `.pi` dir keeps its files. Exit 0 with last `stopReason: error` and `WebSocket error` (with partial text mentioning quota) → `error`, `error_kind: conn_error`, `resumable: true`, not `rate_limited`; `WebSocket idle timeout` → `conn_error`; `Invalid API key` → plain `error`; an error followed by a retried `stop` → `ok`. `supervise.sh` → `failed reason=conn_error resumable=1` (plain error → `resumable=0`); `resume-run.sh --dry-run` accepts the run |
 | Pi freeze, real (2026-10-19) | `run-agent.sh --agent pi --model openai-codex/gpt-6-luna --reasoning low` in a throwaway repo, 3000-word essay, pi SIGSTOPped 180 s mid-stream: the first message ended `WebSocket error`, pi auto-retried after 2 s and finished (`ok`, `last_stop_reason: stop`, `pi_retry: on`, 234 s, 3801 words); no `.pi` left in the worktree; `~/.pi/agent/settings.json` unchanged. Freeze sweep without retry: 20–75 s recover, 90 s–3 min `WebSocket error`, ≥5 min `WebSocket idle timeout after 300000ms`, exit 0 every time |
 | Reset parsing | `mark-limited claude --message "…resets 11pm (Asia/Seoul)"`, `"reset at 10-21 01:00:00 UTC"`, `"retry-after-ms=…"`, unknown text → +1h |

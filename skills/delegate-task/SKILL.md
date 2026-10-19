@@ -116,6 +116,8 @@ bash scripts/run-agent.sh --agent pi --review /workspace/repo [--base main] --pr
 The runner:
 - `--cwd` is a git repo: always its own worktree and branch `agent/<run-id>` in `<run-dir>/wt`
 - no `--cwd`, or `--cwd` isn't a repo: works in `<run-dir>/work`. A non-repo `--cwd` and every `--input DIR` are passed as extra readable dirs (`--add-dir` for Claude, Codex and omp; Pi gets the absolute paths in the brief)
+- private, exclusively allocated run dirs: a reused/unsafe `--id` is rejected instead of overwriting logs.
+  `--timeout` must be positive seconds; it bounds even a silent run
 - reads model, reasoning, permission and timeout from the config (arguments win) and loads `~/.agent-keys`.
   Model or reasoning at `native`/`null` means no flag is passed: the CLI's own settings apply
 - Pi: turns on pi's auto-retry for that run only (`pi_retry` in the summary says `on` or why it was skipped).
@@ -123,8 +125,16 @@ The runner:
   `~/.pi/agent/settings.json`, which is never changed), passes `--approve`, keeps both files out of git with a
   self-ignoring `.pi/.gitignore`, and removes them after the run. Skipped for `--review` and when the work dir
   already has its own trust-gated `.pi` files or `.agents/skills`; their trust stays the user's decision
-- Pi/omp exit 0 even when they stop on an error, so the last message's `stopReason` decides the status
-- prints a JSON summary: status (`ok`, `error`, `timeout`, `rate_limited`), `error_kind` (`conn_error` when the run ended on a dropped connection or model stream) and `resumable`, permission, model, reasoning, branch, `changed_files` (repo), `artifacts` (files created in the work dir, up to 100), a summary of at most 1500 chars, session_id, run_dir
+- Claude streams JSON progress (including partial messages); final `result` must be `subtype: success`
+  with `is_error: false`. Codex uses `turn.completed` / `turn.failed`, not just its result file
+- Pi and older omp JSON modes can exit 0 on failure: the final assistant `stopReason` / error decides,
+  not a text prefix. Later successful retries supersede earlier errors; truncated/aborted turns fail
+- prints a JSON summary: status (`ok`, `error`, `timeout`, `rate_limited`), `error_kind` (`conn_error`
+  for transport failure; `incomplete_output` for exit 0 without terminal completion), `resumable`,
+  the **actual** process `exit_code`, permission, model, reasoning, branch, `changed_files` (repo),
+  `artifacts` (up to 100), a summary of at most 1500 chars, session_id, run_dir.
+  A nonzero exit never becomes success; final error text outranks partial prose/old reconnect stderr.
+  `meta.json` is published atomically. Rate-limit cleanup retains new commits and ignored artifacts
 
 Permission flags (checked on codex 0.163.0, Claude Code 2.1.197, pi 1.3.0, omp 18.12.1):
 
@@ -170,7 +180,8 @@ limits). A subagent that waits in Shell keeps the box awake, so long runs get a 
 | `running` (`reason=budget_used`) | dispatch the next supervisor right away, same brief |
 | `done` / `failed` | the run ended: read `meta.json` and report (section 5). `reason=died_no_meta` means it died without a summary, usually a box pause or restart: restart it |
 | `failed` (`reason=conn_error`) | the run ended on a dropped connection or model stream (WebSocket error, idle timeout, ECONNRESET, socket hang up, fetch failed, ...), usually after a box pause: restart it right away, no need to ask |
-| `stalled` | no output and no CPU for 10 minutes: restart it |
+| `running` (`reason=idle_suspected`, `next=continue`) | silence/low CPU is advisory: keep supervising; do **not** restart solely on this signal. The absolute timeout still applies |
+| `stalled` | only emitted with explicit `--stall-action restart`; restart under that opt-in heuristic, which can still misjudge silent thinking |
 
 Every line with `resumable=1` (`stalled`, `died_no_meta`, `conn_error`) gets the restart below. A run you
 started without a supervisor that returns `error_kind: conn_error` gets the same treatment.
@@ -182,21 +193,26 @@ bash scripts/resume-run.sh <id> --kill [-- --timeout 7200]   # --dry-run shows t
 ```
 
 It stops what is left of the old process tree, commits the work in progress on `agent/<id>`, and starts a
-new run `<id>-r2` (then `-r3`, ...) from that worktree. The new run uses the same agent, model and reasoning
-and the original brief plus a continuation note ("check what is done, don't start over"). Then supervise
+new run `<id>-r2` (then `-r3`, ...) from that worktree. The new run uses the same agent, model, reasoning
+and permission (unknown legacy permission defaults to `safe`), the same run root, and the original brief
+plus a continuation note ("check what is done, don't start over"). Native sessions are **not** automatically
+reused across new worktrees; old absolute paths and already-executed tool actions need review. Then supervise
 the new id. Tell the user in one line that it was restarted and why. Stalls, deaths and `conn_error` share one
 cap: after 2 restarts of the same task, stop and tell the user.
 
 `supervise.sh` line: `status=running|done|failed|stalled next=continue|return run_dir=DIR reason=... idle=Ns
 cpu_delta=Ns forks=N remaining=Ns resumable=0|1`. Details go to `<run-dir>/supervise.log`. Options: `--slice S` (one call,
-default 600), `--interval S` (30), `--stall-min M` (10).
+default 600), `--interval S` (30), `--stall-min M` (10), `--stall-action report|restart` (report).
+The heuristic watches run logs and owned Pi/omp session files, not all global session directories.
+Observation gaps and detected VM wakes reset its grace window; they do not extend the absolute timeout.
 
 ## 5. Report back
 
 - 3 to 6 lines: worker and why, result, checks, branch or artifact paths, run dir. No raw logs.
 - Want to share a file? Send it from `artifacts`. Don't paste long content.
 - `error` / `timeout`: read `stderr_tail`, fix it (auth, model id, deps) or switch worker. At most 2 retries.
-- Continue a session with `--resume <session_id>`.
+- Continue explicitly with `--resume <session_id>` (Claude/Codex) or the saved session file for
+  Pi/omp when lookup is scoped to a new run's session directory. Check cwd/tool side effects first.
 
 ## Known limits
 
@@ -211,9 +227,23 @@ default 600), `--interval S` (30), `--stall-min M` (10).
   error`; 5 min or more, `WebSocket idle timeout after 300000ms` right after waking. pi still exits 0. With retry
   on, pi reconnected 2 s after a 3-minute freeze and finished. The runner turns retry on per run (section 4), and
   a run that still ends on a connection error comes back as `conn_error` and is resumed automatically (within
-  the cap of 2 restarts). Codex, Claude Code and omp were not measured (omp has its own `retry.enabled` setting, on by default).
+  the cap of 2 restarts). Later supplied freeze tests measured Codex, Claude and omp at 60/120/300/600 s:
+  all twelve completed, but repeated connection kills still failed Codex and one of two Claude attempts.
+  These are version/provider/proxy-specific observations, not guarantees; no live freeze tests were rerun
+  for this hardening. Current upstream omp fixes zero-exit errors; older versions still need event parsing.
 - A box restart kills every run. `supervise.sh` then reports `failed reason=died_no_meta`; restart with
   `resume-run.sh`. Only committed or saved work survives in the worktree.
+- **Silence is not a hang.** Even streamed Claude output can pause; Codex often reports only step boundaries.
+  Default supervision never authorizes restart from silence alone. Use the wall-clock timeout, or explicitly
+  opt into heuristic restarts for a workload you know. Heartbeats cannot prevent forced VM suspension.
+- **Recovery is not exactly-once.** Checkpoint/re-prompt can repeat external effects. The two-restart cap
+  is bot policy, not a cross-process lock. There is no global concurrency/quota scheduler or log rotation;
+  serialize resumes of the same task. Re-supply external `--input` dirs and nondefault timeout via overrides.
+  PID + cwd checks reduce stale-PID mistakes but are not start-time/boot fencing.
+- Runner supervision requires the Linux box's `/proc`, GNU `timeout`/utilities, Bash and Python; native
+  macOS/Windows supervision is not certified. Worktrees do not isolate credentials or shared services.
+  See [source-backed runner research](../../docs/research/agent-runners.md) and
+  [offline validation](../../TESTING.md); no proxy or native-session rewrite was added.
 
 ## Always ask first
 Full auto covers what happens **inside** the run. These still need the user's OK every time:

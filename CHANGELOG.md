@@ -4,6 +4,19 @@
 
 First release.
 
+- Delegate runner hardening (still **0.1.0**), informed by
+  [source-backed OSS runner research](docs/research/agent-runners.md):
+  - Parse Claude streamed results, Codex terminal failures, and Pi/omp final stop reasons;
+    preserve actual exit codes, reject missing/truncated completion, classify transport errors
+    without mistaking partial output or old retry diagnostics for the final error.
+  - Stream Claude partial progress; silence/low CPU is advisory by default, with explicit
+    `--stall-action restart` opt-in and wake/observation-gap grace. Publish metadata atomically.
+  - Preserve restart permissions/run roots; make dry-run write-free; reject reused/unsafe run IDs,
+    keep run data private, and check timeout cwd before trusting a PID. Rate-limit cleanup now
+    retains agent commits and ignored artifacts instead of treating a clean index as no work.
+  - Add isolated fake-CLI regression coverage; native cross-worktree session recovery and real
+    host-suspend guarantees remain out of scope. See `TESTING.md` for evidence and limitations.
+
 - Long delegated runs survive box idle pauses (still **0.1.0**): `delegate-task` adds
   `scripts/supervise.sh` (bounded watch slices, one status line: running, done, failed or
   stalled) for supervisor subagents rotated every 30 minutes, and `scripts/resume-run.sh`
