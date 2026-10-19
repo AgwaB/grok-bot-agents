@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""Thin JSON entrypoint. Python 3.11+; no third-party dependencies."""
+import sys
+
+# Even setup plan/help must not create __pycache__ beside an installed skill.
+sys.dont_write_bytecode = True
+
+import argparse
+import importlib
+import json
+from pathlib import Path
+import subprocess
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        # argparse's default errors echo argv, which might contain a pasted key.
+        raise ValueError('invalid arguments')
+
+
+def main():
+    root = Path(__file__).resolve().parent.parent
+    required = ('configure-agents/scripts/agents_config.py', 'import-agents/scripts/import_plan.py',
+                'import-agents/scripts/apply_import.sh', 'import-agents/scripts/parity_check.py',
+                'delegate-task/scripts/run-agent.sh', 'delegate-task/scripts/run_lifecycle.py')
+    if any(not (root / 'skills' / path).is_file() for path in required):
+        return dict(status='blocked', reason='plugin_incomplete', next_action='repair_plugin', requires_approval=False)
+    modules = {name: importlib.import_module('gba_' + name) for name in ('import', 'setup', 'runs', 'doctor')}
+    parser = Parser(prog='gba', description=__doc__)
+    sub = parser.add_subparsers(dest='command', required=True)
+    for module in modules.values():
+        module.configure(sub)
+    args = parser.parse_args()
+    module = modules['doctor' if args.command == 'verify' else args.command]
+    return module.handle(args, root)
+
+
+if __name__ == '__main__':
+    try:
+        response = main()
+    except KeyboardInterrupt:
+        response = dict(status='blocked', reason='interrupted', next_action='inspect_status', requires_approval=False)
+    except BlockingIOError:
+        response = dict(status='blocked', reason='operation_busy', next_action='wait', requires_approval=False)
+    except subprocess.TimeoutExpired:
+        response = dict(status='blocked', reason='helper_timeout', next_action='inspect_status', requires_approval=False)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, ImportError):
+        response = dict(status='error', reason='invalid_input_or_state', next_action='review_inputs', requires_approval=False)
+    except Exception:
+        response = dict(status='error', reason='unexpected_failure', next_action='review_inputs', requires_approval=False)
+    response = dict(response, schema=1, action_owner='bot' if response.get('next_action') else None)
+    print(json.dumps(response, ensure_ascii=True, separators=(',', ':')))
+    sys.exit({'ok': 0, 'blocked': 3, 'error': 2}.get(response['status'], 2))
