@@ -1,6 +1,6 @@
 #!/bin/sh
 # Runs ON THE USER'S COMPUTER (macOS/Linux) through one machine Shell call. Read-only:
-# it only tests whether paths exist (names, never contents) and runs `<cli> --version`.
+# it tests paths, runs `<cli> --version`, and scans config/auth contents internally; only names are emitted.
 # omp, when sqlite3 exists (macOS: /usr/bin/sqlite3): copies agent.db(+wal/shm) to a private temp dir, reads only
 # provider + whether disabled_cause is set (never the data column), deletes the copy. The original is never opened.
 #   sh -s -- [claude codex pi omp] <<'DETECT'
