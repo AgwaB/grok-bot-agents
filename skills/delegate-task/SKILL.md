@@ -41,12 +41,12 @@ On every wake call `gba runs list --open`, then `gba runs next ID` for tracked r
 ## Wake, supervision and bounded recovery
 
 Call `gba runs next ID` after launch. `wake_mode=webhook` / `end_turn`: **end the turn, no supervisor**.
-`wake_mode=supervisor`: record `--handoff`, dispatch the supervisor, then acknowledge `--supervisor-started`.
-`auto` selects webhook only with both wake secrets present and timeout ≤ `wake_auto_max_sec` (default 600,
-validated integer 1–86400 in `~/.grok-bot-agents/config.json`); otherwise supervisor. `none` means manual checks.
-The VM pauses after a few idle minutes: webhooks do NOT keep it awake. Use `--wake supervisor` for long
-or uncertain runs, even below the threshold. Background Shell completion alone does not wake an idle bot.
-Supervisor brief (absolute paths): “Run `bash <D>/supervise.sh ID 1800 --new`, then the same without `--new`
+`wake_mode=supervisor`: record `--handoff`, then dispatch the supervisor as a **background subagent (executor
+Task)**, never your own background Shell, then acknowledge `--supervisor-started`. One Shell slice is not enough.
+`auto` picks webhook only with both wake secrets and timeout ≤ `wake_auto_max_sec` (default 600, integer 1–86400
+in `~/.grok-bot-agents/config.json`); else supervisor. `none` = manual checks. Long research/agent runs: expect
+supervisor. The VM pauses when idle and webhooks do NOT keep it awake; use `--wake supervisor` if unsure.
+Supervisor brief (absolute paths): “Loop: `bash <D>/supervise.sh ID 1800 --new`, then the same without `--new`
 back to back until `next=return`; allow 11 minutes per Shell wait. End when the run ends; return only that line.”
 Rotate at 30 minutes with `gba runs next ID --rotate`, dispatch and acknowledge. Handoff/recovery disables
 webhooks for the entire lineage; an already-claimed webhook refuses later handoff/recovery. Follow manual-check actions.
