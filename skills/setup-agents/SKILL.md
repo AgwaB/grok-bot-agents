@@ -51,6 +51,8 @@ API keys: masked secret input, or user takeover plus `read -rsp` on the box. Cre
 only if missing, keep mode 600, replace the selected `export NAME=` assignment without duplicates,
 and never print/source it merely to inspect it. The runner loads it for actual runs.
 Record only auth type and env **name** with `agents_config.py set`, never the value.
+Optional: offer the delegate-task skill's per-bot completion webhook routine and secret requests for
+`GBA_WAKE_URL` / `GBA_WAKE_HEADER`; confirm with `gba wake test`. Long runs still need a supervisor to prevent VM pause.
 
 ## Preferences and verification
 

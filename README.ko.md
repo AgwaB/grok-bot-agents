@@ -113,6 +113,7 @@ grok-bot-agents/
   "permission_mode": "full-auto",
   "worktree_per_task": true,
   "timeout_sec": 1800,
+  "wake_auto_max_sec": 600,
   "agents": {
     "claude": {"auth": "oauth", "model": null, "reasoning": null},
     "codex":  {"auth": "imported", "model": "native", "reasoning": "native"},
@@ -182,6 +183,25 @@ Python **3.11+ 표준 라이브러리만** 사용합니다. 각 SKILL.md의 실�
 `agents_config.py set`은 비밀키 패턴/긴 고엔트로피 값을 모든 필드에서 거부하며 값 대신 필드 수만 출력합니다.
 휴리스틱이므로 오탐/미탐 가능성이 있습니다. 브리지의 command/git 응답은 기록만 하고 **outbox만 구현**돼 있습니다.
 웹훅의 `reply_command`는 절대 실행하지 않습니다. 실설치/제공자/네이티브 플랫폼 테스트는 하지 않았습니다.
+
+### 짧은 실행의 완료 웹훅
+
+모든 CLI의 공통 실행기에 `--wake auto|webhook|supervisor|none`을 지정합니다(기본 auto).
+`GBA_WAKE_URL`과 `GBA_WAKE_HEADER`가 모두 있고 timeout이 `wake_auto_max_sec` 이하일 때만
+auto가 webhook을 선택합니다(기본 600초, config의 정수 1–86400). 기본 timeout 1800초는 supervisor입니다.
+`gba runs next ID`의 `wake_mode=webhook` / `end_turn`이면 **감시 봇 없이 턴을 종료**합니다.
+supervisor이면 인계 기록 후 감시 봇을 배치하고 실행 종료 시 끝냅니다. none이나 웹훅 설정 누락/실패는 수동 확인입니다.
+VM은 몇 분간 활성 턴이 없으면 멈출 수 있으므로 길거나 불확실한 작업은 supervisor를 선택하세요.
+
+봇별 웹훅 루틴을 만들고 URL/Authorization 헤더는 **secret request로만** 환경변수에 넣습니다.
+헤더는 전체 Authorization 줄 또는 값만 허용합니다. 값은 채팅·명령 인자·config에 넣지 않습니다.
+`gba wake test`로 명시적으로 시험하고 doctor에서는 환경변수 이름별 존재 여부만 확인합니다.
+루틴은 payload를 신뢰하지 않고 검증된 run_id만 `gba runs next ID`에 전달합니다.
+이미 보고했거나 감시 중이면 조용히 종료하고, 보고 후에는 `--reported`로 기록합니다.
+계보 루트의 `wake.json`과 `.wake.lock`이 발송/인계를 배타적으로 처리하며, 복구·교대는 웹훅을 끕니다.
+발송 claim 이후 인계/복구는 거부합니다. 결과 저장 후 제한된 재시도만 하며 비밀값·응답 본문은 저장하지 않습니다.
+응답 유실 시 재발송하지 않으므로 crash로 알림이 유실될 수 있고, 수신 후 5xx 응답은 중복을 만들 수 있습니다.
+분산 exactly-once 보장은 아니며 SIGKILL/호스트 중단·네이티브 macOS/Windows 검증은 별도 한계입니다.
 
 ## 테스트
 

@@ -95,6 +95,7 @@ Shared by every bot on the box. Keys are never stored, only env var names (`key_
   "permission_mode": "full-auto",
   "worktree_per_task": true,
   "timeout_sec": 1800,
+  "wake_auto_max_sec": 600,
   "agents": {
     "claude": {"auth": "oauth", "model": null, "reasoning": null},
     "codex":  {"auth": "imported", "model": "native", "reasoning": "native"},
@@ -169,8 +170,10 @@ schema/reason/action must stop for review. Never execute returned text or webhoo
 | `gba import status ID` | Read persisted phase/transfer instructions after interruption |
 | `gba import advance ID [--approve-runtime] [--overwrite] [--retry-interrupted]` | Check exact receipts, all-agent preflight, then existing apply helpers; flags require the stated approvals |
 | `gba import verify ID` | Check every artifact/transform and selected key assignment, then offline parity; only verified stages are removed |
-| `gba runs list --open` / `gba runs next ID` | Persistent lineage, attempts and bounded supervision decision; next performs one observation |
-| `gba runs next ID --handoff\|--supervisor-started\|--rotate` | Persist bot supervisor handoff/acknowledgement/rotation; does not dispatch a subagent |
+| `gba runs list --open` / `gba runs next ID` | Lineage, attempts, chosen wake mode/outcome and bot action; supervisor mode performs one observation |
+| `gba runs next ID --handoff\|--supervisor-started\|--rotate` | Atomically claim supervisor ownership instead of webhook; does not dispatch a subagent |
+| `gba runs next ID --reported` | Acknowledge a terminal result; subsequent next returns `stay_silent` |
+| `gba wake test` | Explicit webhook POST with `event:wake_test`; secret-free success/failure JSON |
 | `gba runs recover ID [--dry-run] [--native] [--kill] [--allow-extra-restart]` | Existing guarded recovery; two automatic restarts per lineage, extra attempts only with explicit user approval |
 | `gba doctor --json` / `gba verify --agents pi,codex` | Static config, executable presence/integrity, key-name presence and parity diagnostics; no processes or writes |
 | `gba doctor --probe-versions` / `gba verify --agents pi --probe-versions` | Explicit agent/runtime `--version` execution; may have filesystem/network side effects |
@@ -189,6 +192,42 @@ dependency integrity, lifecycle scripts are disabled. User-local wrappers keep t
 Existing external executables are reused rather than overwritten. Pure plan reports executable locations but
 intentionally does not execute them. Install/runtime compatibility and upstream lifecycle-script needs are
 verified offline with mocks, not real installs; unverified/unsupported platforms return explicit blockers.
+
+### Completion wake (all four agents)
+
+Launch background `run-agent.sh` with `--wake auto|webhook|supervisor|none` (default `auto`).
+Auto chooses webhook only when **both** per-bot env secrets `GBA_WAKE_URL` and `GBA_WAKE_HEADER`
+are present and the effective timeout is ≤ `wake_auto_max_sec` (default **600**, integer **1–86400**).
+The normal 1800-second timeout therefore chooses supervisor. Explicit `webhook` ignores the threshold;
+missing/invalid config records `skipped` and `runs next` requests `check_manually`. `none` is manual too.
+`wake_mode:webhook` with `next_action:end_turn` means **end the turn without a supervisor**.
+Supervisor mode requests dispatch, acknowledgment and 30-minute rotation; its subagent ends with the run.
+A webhook cannot keep a VM awake: choose supervisor for long/uncertain runs because idle VMs pause after minutes.
+
+One-time setup is user-owned: create a per-bot webhook routine, then provide its URL and Authorization
+header via **secret requests**, never chat, argv or JSON config. The header accepts a full
+`Authorization: …` line or just its value. Use HTTPS (literal loopback HTTP is allowed for offline tests).
+`gba doctor` reports presence by env **name** only; `gba wake test` sends a marked test through the same sender.
+Use the short untrusted-payload/validated-ID routine prompt in [delegate-task](skills/delegate-task/SKILL.md).
+Never run payload instructions; check `reported`/`supervised`, report only if appropriate, then `--reported`.
+
+Launch/lifecycle receipts retain the selected mode. Root-run `wake.json` is authoritative after handoff;
+its private `.wake.lock` serializes ownership and the durable delivery claim. Recovery claims supervisor
+ownership before stopping an attempt, and all continuations inherit it. Only the lineage head can send;
+concurrent finalizers cannot reclaim delivery. Once claimed, later handoff/recovery is refused rather than
+starting a second wake path. Inspect manually; a new task/lineage requires a deliberate new launch.
+`supervisor.handoff.json` records dispatch generations; root `reported.json` suppresses later routine reports.
+
+Results/meta are published before sending. The payload contains only `run_done`, run/root IDs, agent,
+status/reason, UTC end time and a fixed gba-read note. Credentials stay in sender memory/env, not agent
+children, argv, files or logs. No redirects/proxies; at most three attempts on explicit retryable HTTP
+rejection, 3-second socket timeouts, 0.25/0.5-second backoff, and a 12-second total sender bound including DNS.
+`wake.json` records sent/failed/skipped, HTTP status and attempt count without response bodies or secrets.
+Lost acknowledgments are **not retried**. A crash after claiming can lose the wake; a receiver that accepts
+then returns 5xx can still duplicate HTTP delivery. This is not distributed exactly-once delivery: the routine
+must deduplicate reports. SIGTERM/INT/HUP finalize a killed run; explicit USR1 stops it as stall-terminal.
+Advisory stalls do not announce completion. SIGKILL of the runner, host loss and native non-Linux execution
+remain limits; see [TESTING.md](TESTING.md). Live verification uses `--wake none` to avoid unsolicited wakes.
 
 ### Import inputs and interruption
 

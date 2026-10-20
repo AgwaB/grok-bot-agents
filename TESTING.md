@@ -1,5 +1,62 @@
 # Testing
 
+## Completion wake (0.1.0, 2026-10-20)
+
+**Current evidence:** offline only, clean environments with `mktemp`/TemporaryDirectory HOME,
+all four CLIs stubbed, HTTP bound only to `127.0.0.1`. No real auth homes, credentials, routine URLs,
+provider requests, installs, uploads or external mutations. Version remains **0.1.0**.
+Use the exact full-suite commands in the next section (they were all rerun for this change).
+Focused wake command, also from the repository root:
+
+```bash
+h=$(mktemp -d); trap 'rm -rf "$h"' EXIT
+env -i HOME="$h" PATH=/usr/bin:/bin LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 \
+  python3 -m unittest discover -s tests -p '*wake_test.py' -v
+```
+
+Results:
+
+- Full `python3 -m unittest discover -s tests -p '*_test.py' -v`: **260 run, 259 passed, 1 skipped**
+  (PowerShell unavailable), including **23 new wake methods** and all 237 existing methods.
+- `bash tests/run_import_tests.sh`: **59 passed / 1 skipped**, **26 auth checks passed**,
+  scanner parity, import ShellCheck/syntax/compilation passed.
+- `python3 tests/delegate_runner_test.py`: **66 passed**; `bash tests/delegate_pi_retry_test.sh`:
+  **26 checks passed**. Full `shellcheck -x skills/*/scripts/*.sh tests/*.sh`, Bash syntax,
+  Python compilation (temporary cache), and `git diff --check`: **passed**.
+- Active LSP error probe: **15 changed Python/shell files clean**; extensionless `scripts/gba`
+  has no configured LSP server and was covered by compilation/CLI tests instead. No code suppressions added.
+- SKILL.md counts: delegate **69 → 79**, setup **68 → 70**; other three unchanged; total **334 → 346**
+  (350-line contract passes). No `.pi/` run state is tracked.
+
+Regression map (`tests/wake_test.py`, 17 methods; `tests/gba_wake_test.py`, 6 methods):
+
+| Area | Passing test methods |
+| --- | --- |
+| All agents / terminal payload | `test_all_agents_success_failure_timeout_once_and_private_payload`, `test_runner_kill_and_stall_terminal_finalize_after_stopping_worker` |
+| Mode/config selection | `test_auto_selection_overrides_and_validated_threshold`, `test_threshold_config_set_validation_and_default`, `test_supervisor_none_missing_config_and_failed_delivery_actions` |
+| Handoff / concurrency | `test_concurrent_finalizers_claim_once_and_late_handoff_is_refused`, `test_handoff_and_finalizer_race_has_only_one_owner`, `test_handoff_acknowledge_rotate_disable_webhook_and_dispatch_once`, `test_sending_claim_refuses_cli_rotation_without_waiting_for_http` |
+| Recovery / lineage | `test_recovery_disables_webhook_before_kill_and_keeps_lineage`, `test_only_lineage_head_can_send_even_with_concurrent_old_attempts`, `test_refused_recovery_does_not_disable_webhook_or_stop_worker` |
+| Initialization / signals / crash claim | `test_early_handoff_survives_launch_initialization`, `test_post_reap_signal_does_not_target_stale_agent_or_change_result`, `test_interrupted_claim_never_replays` |
+| Delivery / retry bounds | `test_retries_rejection_failed_recorded_and_results_precede_network`, `test_retry_then_success_and_bare_header`, `test_lost_acknowledgement_is_not_retried`, `test_unresponsive_http_is_bounded_and_does_not_change_result` |
+| Secrets / transport validation | `test_secret_absent_from_ps_argv_logs_and_state_and_child_env`, `test_missing_invalid_config_and_redirect_never_leak_or_send_elsewhere` |
+| Bot CLI / routine test | `test_webhook_next_ends_turn_and_list_surfaces_chosen_mode`, `test_wake_test_uses_same_transport_and_doctor_is_name_only_and_static` |
+
+The review regressions cover a handoff before `record-launch`, refused recovery leaving the original
+webhook intact, and signals after child reaping. Existing all-agent native-rejection fallback tests also
+verify that the new write-free recovery preflight recognizes an inherited workdir lock. Existing doctor
+stub expectations now require `--wake none`; skill contracts enforce the wake/secret/routine wording.
+
+Design/limits: launch/lifecycle receipts preserve launch mode; root `wake.json` + `.wake.lock` own the
+lineage's effective mode and durable send claim. Claims cannot be reused by another attempt or supervisor.
+Results are written/fsynced first; only allowlisted completion fields leave the process. HTTP rejection
+may retry three times; lost acknowledgments do not retry. A claim-before-send crash can lose a wake;
+a remote endpoint accepting a request then returning 5xx can cause duplicate delivery despite local dedupe.
+The routine must check `reported`/`supervised` and mark completed reports with `--reported`.
+SIGKILL of the runner, power loss, disk-full, remote filesystem locks, native macOS/Windows/PowerShell,
+real webhook routine behavior and the live VM-idle cutoff were **not certified**. The new transport uses
+stdlib Python and portable lock branches; existing box runner/ownership requirements still apply.
+Long unattended work still needs the supervisor: a webhook does not keep a paused VM running.
+
 ## gba CLI round-2 review fixes (0.1.0, 2026-10-19)
 
 All new test evidence is **offline**. No real credentials, provider calls, package downloads, global

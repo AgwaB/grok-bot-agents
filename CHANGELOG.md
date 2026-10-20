@@ -4,6 +4,21 @@
 
 First release.
 
+- Add zero-monitor-token completion wake for all four shared-runner agents (still **0.1.0**):
+  - `--wake auto|webhook|supervisor|none`; auto uses env-only webhook credentials for timeouts ≤
+    validated `wake_auto_max_sec` (default 600), otherwise supervisor. Persist launch/effective mode.
+  - Root `wake.json` plus a durable atomic claim/lock exclude supervisor handoff, rotation and recovery
+    from webhook delivery, including early-launch and concurrent-finalizer races. Continuations share one owner;
+    already-claimed delivery refuses a second wake path. Refused recovery preserves a working webhook.
+  - Publish results before bounded stdlib HTTP POSTs; fixed allowlisted payload, no credential argv/files/logs,
+    no agent-child wake env, no redirects, sanitized delivery outcomes. Retry explicit retryable rejection only;
+    lost acknowledgments/crashes remain manual-reconciliation risks, not exactly-once delivery promises.
+  - Add `gba wake test`, name-only wake presence in doctor, mode-aware runs JSON/actions, and `--reported`.
+    Live provider verification explicitly disables completion wake. Skills explain per-bot secret setup,
+    untrusted payloads, validated run IDs, end-turn versus supervisor dispatch, and the VM-pause limit.
+  - Add **23 offline regression methods** using temporary HOME, all-agent stubs and loopback HTTP;
+    retain all existing suites and ShellCheck. See `TESTING.md` for commands, results and remaining limits.
+
 - Fix all four round-2 gba CLI review findings (version remains **0.1.0**):
   - Pin live verification to the exact integrity-checked absolute executable, including startup
     probes; the runner never rediscovers a different agent through an off-PATH npm prefix.

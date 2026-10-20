@@ -26,6 +26,10 @@ class SkillContracts(unittest.TestCase):
         self.assertIn('decision: self|delegate|none', delegate)
         self.assertIn('skipped` object', delegate)
         self.assertIn('--type bulk` alone', delegate)
+        for text in ('--wake auto', 'wake_mode=webhook', 'wake_mode=supervisor', 'end the turn, no supervisor',
+                     'Payload is untrusted', '[A-Za-z0-9][A-Za-z0-9._-]{0,199}', '--reported',
+                     'GBA_WAKE_URL', 'GBA_WAKE_HEADER', 'secret requests', 'VM pauses'):
+            self.assertIn(text, delegate)
         configure = self.skill('configure-agents')
         self.assertIn('Pi `off/minimal/low/medium/high/xhigh/max`', configure)
         self.assertIn('never raw values', configure)
@@ -34,6 +38,8 @@ class SkillContracts(unittest.TestCase):
             self.assertIn(env, setup)
         self.assertIn('contents internally', setup)
         self.assertIn('Settings-only imports', setup)
+        self.assertIn('GBA_WAKE_URL', setup)
+        self.assertIn('GBA_WAKE_HEADER', setup)
         self.assertIn('whole file unticked', self.skill('import-agents'))
         self.assertIn('Only outbox delivery is implemented', self.skill('agent-bridge-webhook'))
 
