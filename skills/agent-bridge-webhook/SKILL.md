@@ -40,6 +40,7 @@ Create a routine named **Agent bridge**, trigger `{"type":"webhook"}`, using thi
 2. If missing, open a terminal with `grok-send-task --setup`: Terminal on macOS, the desktop terminal
    on Linux. The user copies the webhook URL and Authorization header from the routine panel directly
    into that terminal (header input hidden). Send panel links, never ask for either value in chat.
+   Panel links = the routine's field links from automation status (open **POST to**/**header**); the info-pane row doesn't.
    Caller config is `~/.config/grok-bot-agents/bridge.env`, mode 600, parsed rather than sourced.
 3. Windows is less tested and has no native PowerShell sender. Offer WSL/Git Bash if available;
    otherwise use approved outbox retrieval. CI uses its secret store, never repo files/chat.
