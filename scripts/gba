@@ -22,10 +22,11 @@ def main():
     root = Path(__file__).resolve().parent.parent
     required = ('configure-agents/scripts/agents_config.py', 'import-agents/scripts/import_plan.py',
                 'import-agents/scripts/apply_import.sh', 'import-agents/scripts/parity_check.py',
-                'delegate-task/scripts/run-agent.sh', 'delegate-task/scripts/run_lifecycle.py')
+                'delegate-task/scripts/run-agent.sh', 'delegate-task/scripts/run_lifecycle.py',
+                'delegate-task/scripts/wake.py')
     if any(not (root / 'skills' / path).is_file() for path in required):
         return dict(status='blocked', reason='plugin_incomplete', next_action='repair_plugin', requires_approval=False)
-    modules = {name: importlib.import_module('gba_' + name) for name in ('import', 'setup', 'runs', 'doctor')}
+    modules = {name: importlib.import_module('gba_' + name) for name in ('import', 'setup', 'runs', 'doctor', 'wake')}
     parser = Parser(prog='gba', description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     for module in modules.values():

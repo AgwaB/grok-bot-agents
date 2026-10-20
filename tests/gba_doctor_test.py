@@ -86,7 +86,7 @@ print("1.2.3")
 args = sys.argv[1:]
 assert args[0].endswith("/skills/delegate-task/scripts/run-agent.sh")
 assert args[1:] == ["--agent", "codex", "--executable", str(pathlib.Path(os.environ["HOME"]) / "fakebin/codex"),
-                    "--read-only", "--timeout", "120", "--prompt", "Reply with exactly: OK"]
+                    "--read-only", "--timeout", "120", "--wake", "none", "--prompt", "Reply with exactly: OK"]
 with (pathlib.Path(os.environ["HOME"]) / "live-starts").open("a") as log: log.write("live\\n")
 print(''' + repr(payload) + ''')
 print("s3cret_CANARY_must_never_appear", file=sys.stderr)

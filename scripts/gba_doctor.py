@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import gba_runs
 import gba_setup as setup
 
 KEY_NAMES = (
@@ -221,6 +222,7 @@ def offline(root, selected=None, probe_versions=False):
                         mode="offline", selected=chosen, config={"status": config_state}, agents=agents,
                         version_probes={"requested": probe_versions}, runtimes=runtimes,
                         keys={"presence": presence, "inventory_readable": readable},
+                        wake={"presence": gba_runs.lifecycle(root).wake.presence()},
                         parity=parity, live={"requested": False, "reason": "live_not_requested"},
                         path_ready=str(setup.home() / ".local/bin") in os.environ.get("PATH", "").split(os.pathsep),
                         runner_path_ready=True)
@@ -250,7 +252,7 @@ def _live_one(root, agent):
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     rc, out, _, code = setup.run_captured(
         [bash, str(runner), "--agent", agent, "--executable", executable,
-         "--read-only", "--timeout", "120", "--prompt", OK_PROMPT],
+         "--read-only", "--timeout", "120", "--wake", "none", "--prompt", OK_PROMPT],
         timeout=150, env=env, cwd=root)
     if code != "ok":
         return {"status": "blocked", "reason": "live_check_failed", "quota": "unknown"}

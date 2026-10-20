@@ -6,12 +6,11 @@ import os
 import re
 import subprocess
 import tempfile
-import time
 from pathlib import Path
 
 SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}\Z")
 RUN_STATES = {"ok", "error", "timeout", "rate_limited"}
-ERROR_KINDS = {"conn_error", "incomplete_output", "auth_error", "rate_limited", "timeout"}
+ERROR_KINDS = {"conn_error", "incomplete_output", "auth_error", "rate_limited", "timeout", "killed", "stall_terminal"}
 
 
 def configure(subparsers):
@@ -26,6 +25,7 @@ def configure(subparsers):
     flags.add_argument("--handoff", action="store_true", help="Persist pending supervisor handoff")
     flags.add_argument("--supervisor-started", action="store_true", help="Acknowledge supervisor dispatch")
     flags.add_argument("--rotate", action="store_true", help="Persist a fresh supervisor generation")
+    flags.add_argument("--reported", action="store_true", help="Acknowledge reporting this terminal result")
     next_cmd.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     recover = commands.add_parser("recover", help="Explicit mutation: checkpoint and launch a continuation")
     recover.add_argument("id")
@@ -99,7 +99,18 @@ def snapshot(run, module):
     launch = load(run / "launch.json")
     timeout = launch.get("timeout_sec")
     agent = meta.get("agent") or launch.get("agent")
+    wake = module.wake_state(run)
+    reasons = {"awaiting_completion", "legacy_supervisor", "supervisor_handoff", "wake_disabled",
+               "wake_config_missing", "wake_config_invalid", "delivery_claimed", "delivered", "http_rejected", "delivery_unknown"}
+    code = wake.get("http_status")
+    attempts = wake.get("attempts")
     return {"id": run.name, "run_status": state,
+            "wake_mode": wake["mode"],
+            "wake": {"outcome": wake["outcome"], "claimed": wake["claimed"],
+                     "reason": wake.get("reason") if wake.get("reason") in reasons else "unknown",
+                     "http_status": code if type(code) is int and 100 <= code <= 599 else None,
+                     "attempts": attempts if type(attempts) is int and 0 <= attempts <= 3 else None},
+            "reported": load(run.parent / info["root_id"] / "reported.json").get("run_id") == run.name,
             "agent": agent if agent in {"pi", "omp", "codex", "claude"} else None,
             "root_id": info["root_id"], "restarts": len(info["attempts"]),
             "timeout_sec": timeout if type(timeout) is int and timeout > 0 else None,
@@ -141,21 +152,36 @@ def observe(run, root, fresh=False):
 
 
 def decide(args, run, root, module):
-    details = snapshot(run, module)
     handoff = load(run / "supervisor.handoff.json")
+    if args.handoff or args.rotate or args.supervisor_started:
+        try:
+            handoff = module.supervisor_handoff(run, "rotate" if args.rotate else "started" if args.supervisor_started else "handoff")
+        except module.LifecycleError as error:
+            return result("blocked", str(error), "check_manually", **snapshot(run, module))
+    details = snapshot(run, module)
     generation = handoff.get("generation", 0)
     if type(generation) is not int or not 0 <= generation < 1000000:
         return result("blocked", "invalid_handoff")
-    if args.handoff or args.rotate or args.supervisor_started:
-        if args.supervisor_started and handoff.get("state") != "pending":
-            return result("blocked", "handoff_not_pending")
-        if args.handoff and handoff.get("state") == "active":
-            return result("blocked", "supervisor_already_active")
-        if args.rotate or not generation:
-            generation += 1
-        handoff = {"schema": 1, "state": "active" if args.supervisor_started else "pending",
-                   "generation": generation, "updated_at": int(time.time())}
-        module.write_json(run / "supervisor.handoff.json", handoff)
+    details["supervisor_generation"] = generation
+    details["supervised"] = handoff.get("state") in {"pending", "active"}
+    if args.reported:
+        if details["run_status"] == "unknown":
+            return result("blocked", "run_not_terminal", **details)
+        origin = module.root_run(run)
+        with module.locked(origin / ".wake.lock"):
+            module.write_json(origin / "reported.json", {"run_id": run.name})
+        details["reported"] = True
+    if details["reported"]:
+        return result("ok", "already_reported", "stay_silent", **details)
+    # Webhook/none never start a supervisor implicitly, even for recoverable
+    # failure. A webhook that was claimed cannot later switch wake paths.
+    if details["wake_mode"] != "supervisor":
+        wake = details["wake"]
+        if details["wake_mode"] == "none" or wake["outcome"] in {"failed", "skipped"}:
+            return result("blocked", "manual_check_required", "check_manually", **details)
+        if details["run_status"] != "unknown":
+            return result("ok", "run_complete", "review_result", **details)
+        return result("ok", "webhook_pending", "end_turn", **details)
     observation = observe(run, root, fresh=args.rotate)
     if not observation:
         return result("blocked", "supervision_unavailable", **details)
@@ -182,7 +208,7 @@ def decide(args, run, root, module):
     if observation["reason"] == "budget_used":
         return result("ok", "supervisor_budget_used", "rotate_supervisor",
                       rotate_command=command("next", run.name, "--rotate"), **details)
-    pending = handoff.get("state") == "pending"
+    pending = handoff.get("state") != "active"
     return result("ok", "supervisor_handoff_pending" if pending else "run_running",
                   "dispatch_supervisor" if pending else "supervise",
                   supervisor_command=supervise_command(run.name, fresh=pending),
@@ -204,7 +230,7 @@ def recover(args, run, root, module):
         planned = module.plan(run, args.new_id, args.allow_extra_restart)
     except module.LifecycleError as error:
         code = str(error)
-        return result("blocked", code, "request_approval" if code == "restart_approval_required" else None,
+        return result("blocked", code, "request_approval" if code == "restart_approval_required" else "check_manually",
                       code == "restart_approval_required")
     cmd = ["bash", str(root / "skills/delegate-task/scripts/resume-run.sh"), str(run)]
     for flag in ("native", "kill", "dry_run", "allow_extra_restart"):
@@ -221,10 +247,10 @@ def recover(args, run, root, module):
         raw = output.read(16384)
     helper_error = parse_error(raw)
     known = {"restart_approval_required", "run_id_exists", "invalid_run_id", "invalid_run_lineage",
-             "invalid_run_metadata", "run_inventory_limit", "lifecycle_unavailable"}
+             "invalid_run_metadata", "run_inventory_limit", "lifecycle_unavailable", "webhook_already_claimed"}
     if helper_error in known:
         capped = helper_error == "restart_approval_required"
-        return result("blocked", helper_error, "request_approval" if capped else None, capped)
+        return result("blocked", helper_error, "request_approval" if capped else "check_manually", capped)
     if proc.returncode == 5:
         return result("blocked", "run_owned", "recover", id=run.name, kill_required=True)
     if args.dry_run:
@@ -259,6 +285,18 @@ def handle(args, root: Path):
             items = []
             for run in entries[:200]:
                 details = snapshot(run, module)
+                mode, wake = details["wake_mode"], details["wake"]
+                if details["reported"]:
+                    action = "stay_silent"
+                elif mode == "none" or (mode == "webhook" and wake["outcome"] in {"skipped", "failed"}):
+                    action = "check_manually"
+                elif details["run_status"] != "unknown":
+                    action = "review_result"
+                elif mode == "webhook":
+                    action = "end_turn"
+                else:
+                    action = "supervise" if load(run / "supervisor.handoff.json").get("state") == "active" else "dispatch_supervisor"
+                details["next_action"] = action
                 if not args.open_only or details["run_status"] != "ok":
                     items.append(details)
             return result("ok", "runs_listed", runs=items, truncated=len(entries) > 200)
