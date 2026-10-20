@@ -1,0 +1,16 @@
+{
+  "name": "grok-bot-agents",
+  "owner": {
+    "name": "AgwaB"
+  },
+  "metadata": {
+    "description": "CLI Agents for Grok Bot: delegate heavy work to Claude Code, Codex, Pi and omp on the box."
+  },
+  "plugins": [
+    {
+      "name": "grok-bot-agents",
+      "source": ".",
+      "description": "Set up or import Claude Code, Codex, Pi and omp on the Grok Bot box, then hand them heavy work and get short summaries with artifact paths back."
+    }
+  ]
+}
