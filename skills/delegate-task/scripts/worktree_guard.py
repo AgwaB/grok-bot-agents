@@ -200,7 +200,14 @@ def main():
     try:
         if dry:
             if path.exists():
-                fd = os.open(path, os.O_RDONLY)
+                # A native-fallback shell can already own this exact lock on
+                # fd 9. Probe a duplicate of that description, not a new open
+                # that would conflict with our own still-held ownership.
+                inherited = False
+                with suppress(OSError):
+                    inherited = (os.environ.get("DELEGATE_LOCK_WORKDIR") == str(workdir)
+                                 and os.path.samestat(os.fstat(9), path.stat()))
+                fd = os.dup(9) if inherited else os.open(path, os.O_RDONLY)
         else:
             fd = 9  # opened by the shell, inherited by every child until the run ends
         guard(workdir, int(sys.argv[3]), fd, kill="--kill" in sys.argv[4:], dry=dry)

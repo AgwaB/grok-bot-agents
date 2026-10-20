@@ -4,7 +4,7 @@
 # Usage:
 #   run-agent.sh --agent codex|claude|pi|omp [--cwd DIR] [--input DIR ...] (--prompt-file FILE | --prompt TEXT)
 #                [--model M] [--reasoning LEVEL] [--permission full-auto|safe] [--read-only]
-#                [--timeout SECONDS] [--id RUN_ID] [--resume SESSION] [--review DIR [--base REF]]
+#                [--timeout SECONDS] [--wake auto|webhook|supervisor|none] [--id RUN_ID] [--resume SESSION] [--review DIR [--base REF]]
 # --cwd is a git repo  -> its own worktree + branch agent/<run-id> (except resume-run.sh --native).
 # --executable ABS_PATH pins startup probes and execution (internal gba verify handoff).
 # --resume-in-place is the internal resume-run.sh opt-in: requires --cwd and --resume.
@@ -13,7 +13,7 @@
 set -uo pipefail
 umask 077  # run prompts, transcripts and session data are private
 
-REVIEW="" BASE="" INPUTS=() AGENT="" EXECUTABLE="" CWD="" PROMPT="" PROMPT_FILE="" MODEL="" REASONING="" PERM="" TIMEOUT="" RUN_ID="" READONLY=0 RESUME="" RESUME_IN_PLACE=0
+REVIEW="" BASE="" INPUTS=() AGENT="" EXECUTABLE="" CWD="" PROMPT="" PROMPT_FILE="" MODEL="" REASONING="" PERM="" TIMEOUT="" RUN_ID="" READONLY=0 RESUME="" RESUME_IN_PLACE=0 WAKE=auto
 CONFIG="${GROK_BOT_AGENTS_CONFIG:-${GROK_AGENTS_CONFIG:-$HOME/.grok-bot-agents/config.json}}"
 if [ -z "${GROK_BOT_AGENTS_CONFIG:-}${GROK_AGENTS_CONFIG:-}" ] && [ ! -e "$CONFIG" ] && [ -e "$HOME/.grok-agents/config.json" ]; then
   CONFIG="$HOME/.grok-agents/config.json"  # legacy dir from before the rename
@@ -32,6 +32,7 @@ while [ $# -gt 0 ]; do
     --reasoning) REASONING="$2"; shift 2;;
     --permission) PERM="$2"; shift 2;;
     --timeout) TIMEOUT="$2"; shift 2;;
+    --wake) WAKE="${2:-}"; [ $# -ge 2 ] || die "invalid wake mode"; shift 2;;
     --id) RUN_ID="$2"; shift 2;;
     --read-only) READONLY=1; shift;;
     --review) REVIEW="$2"; READONLY=1; shift 2;;   # review DIR in place, read-only, verified unchanged
@@ -91,6 +92,14 @@ case "$PERM" in full-auto|safe) ;; *) die "--permission must be full-auto or saf
 [ "$READONLY" = 1 ] && PERM="read-only"
 case "$TIMEOUT" in ''|*[!0-9]*) die "--timeout must be positive seconds";; esac
 [ "$TIMEOUT" -gt 0 ] || die "--timeout must be positive seconds"
+case "$WAKE" in auto|webhook|supervisor|none) ;; *) die "invalid wake mode";; esac
+GBA_WAKE_MODE="$WAKE" GBA_LAUNCH_CONFIG="$CONFIG" python3 - "$TIMEOUT" "$(dirname "$0")" 2>/dev/null <<'PY' || die "invalid wake configuration"
+import os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+from run_lifecycle import read_json, wake
+wake.select(os.environ["GBA_WAKE_MODE"], int(sys.argv[1]), read_json(Path(os.environ["GBA_LAUNCH_CONFIG"])))
+PY
 [ -n "$PROMPT_FILE" ] || [ -n "$PROMPT" ] || die "empty prompt"
 if [ "$RESUME_IN_PLACE" = 1 ]; then
   [ -n "$CWD" ] && [ -n "$RESUME" ] && [ -z "$REVIEW" ] || die "--resume-in-place requires --cwd and --resume, not --review"
@@ -182,7 +191,7 @@ pi_retry_setup() {
     [ -e "$cur/.agents/skills" ] && [ "$cur" != "$home" ] && { PI_RETRY="skipped: $cur/.agents/skills needs project trust"; return 1; }
     [ "$cur" = / ] && break; cur="$(dirname "$cur")"
   done
-  "$EXECUTABLE" --help 2>/dev/null | grep -q -- '--approve' || { PI_RETRY="skipped: this pi has no --approve"; return 1; }
+  (unset GBA_WAKE_URL GBA_WAKE_HEADER; "$EXECUTABLE" --help) 2>/dev/null | grep -q -- '--approve' || { PI_RETRY="skipped: this pi has no --approve"; return 1; }
   [ -d "$d" ] || { mkdir "$d" && PI_RETRY_FILES+=("$d"); }
   if ! { printf '{"retry": {"enabled": true}}\n' > "$d/settings.json" && printf 'settings.json\n.gitignore\n' > "$d/.gitignore"; }; then
     rm -f "$d/settings.json" "$d/.gitignore"; PI_RETRY="skipped: could not write $d"; return 1
@@ -255,7 +264,7 @@ START=$(date +%s)
 # Private, structured launch inputs survive config changes and truncated logs.
 # A restart must match a reservation made by resume-run.sh; the CLI process must
 # not inherit that internal handoff capability.
-python3 "$(dirname "$0")/run_lifecycle.py" record-launch "$RUN_DIR" "$TIMEOUT" "$AGENT" "$MODEL" "$REASONING" "$PERM" "$CWD" "$PROMPT_FILE" "$KIND" "${#INPUTS[@]}" "${INPUTS[@]}" "${EXTRA[@]}" \
+GBA_WAKE_MODE="$WAKE" GBA_LAUNCH_CONFIG="$CONFIG" python3 "$(dirname "$0")/run_lifecycle.py" record-launch "$RUN_DIR" "$TIMEOUT" "$AGENT" "$MODEL" "$REASONING" "$PERM" "$CWD" "$PROMPT_FILE" "$KIND" "${#INPUTS[@]}" "${INPUTS[@]}" "${EXTRA[@]}" \
   >/dev/null 2>&1 || die "lifecycle_unavailable"
 # Persist before launch: startup/auth/transport failure may emit no session event at all.
 if [ -n "$RESUME" ]; then
@@ -264,18 +273,37 @@ if [ -n "$RESUME" ]; then
 fi
 # agent.pid / runner.pid let supervise.sh find the process tree (stall checks, restart after a VM pause).
 # Only the resume/runner handoff may reuse ownership; nested agent commands must contend.
-( cd "$WORKDIR" && unset DELEGATE_LOCK_WORKDIR GBA_RESTART_ROOT && exec timeout --kill-after=30 "$TIMEOUT" "${CMD[@]}" ) >"$RUN_DIR/stdout.log" 2>>"$RUN_DIR/stderr.log" </dev/null &
+TERMINAL_REASON="" AGENT_PID=""
+stop_agent() {
+  TERMINAL_REASON="$1"
+  trap '' TERM INT HUP USR1
+  [ -n "$AGENT_PID" ] || return 0
+  # Address the owned Bash job, not a possibly recycled PID after it exits.
+  kill -TERM %1 2>/dev/null || true
+  wait "$AGENT_PID" 2>/dev/null || true
+  AGENT_PID=""
+}
+# USR1 is an explicit stall-terminal stop; advisory stall observations alone
+# must not announce completion while the worker can still be writing.
+trap 'stop_agent killed' TERM INT HUP
+trap 'stop_agent stall_terminal' USR1
+( cd "$WORKDIR" && unset DELEGATE_LOCK_WORKDIR GBA_RESTART_ROOT GBA_WAKE_URL GBA_WAKE_HEADER && exec timeout --kill-after=30 "$TIMEOUT" "${CMD[@]}" ) >"$RUN_DIR/stdout.log" 2>>"$RUN_DIR/stderr.log" </dev/null &
 AGENT_PID=$!
+[ -z "$TERMINAL_REASON" ] || stop_agent "$TERMINAL_REASON"
 echo "$AGENT_PID" > "$RUN_DIR/agent.pid"; echo "$$" > "$RUN_DIR/runner.pid"
 wait "$AGENT_PID"
 RC=$?
+AGENT_PID=""
+# Once reaped, finish publishing results/wake under the bounded sender deadline.
+trap '' TERM INT HUP USR1
+[ -z "$TERMINAL_REASON" ] || RC=143
 END=$(date +%s)
 pi_retry_cleanup
 
 REVIEW_MODIFIED=""
 if [ -n "$REVIEW" ]; then [ "$(fingerprint "$WORKDIR")" = "$FP_BEFORE" ] || REVIEW_MODIFIED=1; fi
 RESUME_MODE=fresh; [ "$RESUME_IN_PLACE" = 1 ] && RESUME_MODE=native
-SUMMARY=$(RESUME_MODE="$RESUME_MODE" PI_RETRY="$PI_RETRY" REVIEW_MODIFIED="$REVIEW_MODIFIED" PERM="$PERM" MODEL="$MODEL" REASONING="$REASONING" WORKTREE="$WORKTREE" KIND="$KIND" \
+SUMMARY=$(TERMINAL_REASON="$TERMINAL_REASON" RESUME_MODE="$RESUME_MODE" PI_RETRY="$PI_RETRY" REVIEW_MODIFIED="$REVIEW_MODIFIED" PERM="$PERM" MODEL="$MODEL" REASONING="$REASONING" WORKTREE="$WORKTREE" KIND="$KIND" \
   python3 "$(dirname "$0")/summarize_run.py" "$AGENT" "$RUN_DIR" "$RC" "$((END-START))" "$WORKDIR"); SRC=$?
 # Drop only a truly unchanged rate-limited worktree. A clean index can contain new commits;
 # ignored artifacts are also saved work, so neither may be discarded to make a retry look clean.
@@ -284,4 +312,7 @@ if [ "$RESUME_IN_PLACE" = 0 ] && [ "$KIND" = repo ] && [ -n "$START_HEAD" ] && p
     && CLEAN=$(git -C "$WORKDIR" status --porcelain --ignored 2>/dev/null) && [ -z "$CLEAN" ]; then
   git -C "$CWD" worktree remove "$WORKDIR" >/dev/null 2>&1 && git -C "$CWD" branch -d "$WORKTREE" >/dev/null 2>&1
 fi
+# Result/meta publication precedes any network I/O. A failed or interrupted wake
+# never changes the worker result; the lineage's durable claim prevents replay.
+python3 "$(dirname "$0")/run_lifecycle.py" finish-wake "$RUN_DIR" >/dev/null 2>&1 || true
 printf '%s\n' "$SUMMARY"; exit $SRC

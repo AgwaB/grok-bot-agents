@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Turn a run dir into result.md + meta.json and print a short JSON summary (never the full log)."""
+import datetime
 import json
 import os
 import re
@@ -25,8 +26,16 @@ def write_artifact(path, text, atomic=False):
     try:
         with open(path + ".tmp" if atomic else path, "w", encoding="utf-8") as f:
             f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
         if atomic:
             os.replace(path + ".tmp", path)
+            if hasattr(os, "O_DIRECTORY"):
+                fd = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
     except OSError:
         print(json.dumps({"status": "error", "error": "could not write run artifact", "run_dir": run_dir}))
         sys.exit(1)
@@ -134,6 +143,12 @@ if status == "error" and not review_modified and not cancelled and not re.search
     elif re.search(CONN_RE, errtxt, re.I):
         error_kind, resumable = "conn_error", True
 
+terminal_reason = os.environ.get("TERMINAL_REASON")
+if terminal_reason in {"killed", "stall_terminal"}:
+    status, error_kind, resumable = "error", terminal_reason, False
+elif rc in (130, 143):
+    error_kind = "killed"
+
 write_artifact(res_path, result)
 
 artifacts = []
@@ -155,6 +170,7 @@ except (OSError, subprocess.SubprocessError):
     print("warning: could not inspect worktree changes", file=sys.stderr)
 
 meta = {"agent": agent, "status": status, "error_kind": error_kind, "resumable": resumable,
+        "ended_at": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "last_stop_reason": last_stop, "pi_retry": os.environ.get("PI_RETRY") or None,
         "permission": os.environ.get("PERM"), "model": os.environ.get("MODEL") or None,
         "reasoning": os.environ.get("REASONING") or None, "worktree_branch": os.environ.get("WORKTREE"), "exit_code": rc, "seconds": secs, "run_dir": run_dir,

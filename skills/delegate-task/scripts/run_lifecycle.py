@@ -5,15 +5,22 @@ a native rejection followed by a fresh replay consumes another restart. File
 locking is short-lived and independent of the existing workdir ownership lock.
 Reservations also own custom IDs before a child directory or receipt exists.
 """
-import fcntl
+import importlib.util
 import json
 import os
 import re
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}\Z")
 AUTOMATIC_RESTARTS = 2
+
+# Load by trusted sibling path, including when gba imports this module by spec.
+_wake_spec = importlib.util.spec_from_file_location("_gba_wake_transport", Path(__file__).with_name("wake.py"))
+assert _wake_spec is not None and _wake_spec.loader is not None
+wake = importlib.util.module_from_spec(_wake_spec)
+_wake_spec.loader.exec_module(wake)
 
 
 class LifecycleError(Exception):
@@ -49,13 +56,132 @@ def write_json(path, value):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(tmp, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        if hasattr(os, "O_DIRECTORY"):
+            directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+@contextmanager
+def locked(path):
+    # Never unlink the inode: all contenders must lock the same object. POSIX
+    # flock and Windows byte-range locks release automatically on process exit.
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(fd, "r+b") as stream:
+        if os.name == "nt":
+            import msvcrt
+            if os.fstat(stream.fileno()).st_size == 0:
+                stream.write(b"\0")
+                stream.flush()
+            stream.seek(0)
+            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(stream, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def wake_state(run):
+    return read_wake_state(root_run(run))
+
+
+def read_wake_state(origin):
+    value = read_json(origin / "wake.json")
+    if not value:
+        if (origin / "wake.json").exists():
+            raise LifecycleError("invalid_wake_state")
+        return {"schema": 1, "mode": "supervisor", "requested_mode": "supervisor",
+                "claimed": False, **wake.outcome("skipped", "legacy_supervisor")}
+    if (value.get("schema") != 1 or value.get("mode") not in {"webhook", "supervisor", "none"}
+            or value.get("requested_mode") not in wake.MODES or type(value.get("claimed")) is not bool
+            or value.get("outcome") not in {"pending", "sending", "sent", "failed", "skipped"}):
+        raise LifecycleError("invalid_wake_state")
+    return value
+
+
+def supervisor_handoff(run, action="handoff"):
+    """Disable the entire lineage before publishing handoff or killing an owner."""
+    run = Path(run)
+    origin = root_run(run)
+    with locked(origin / ".wake.lock"):
+        state = wake_state(run)
+        if state["claimed"]:
+            raise LifecycleError("webhook_already_claimed")
+        handoff = read_json(run / "supervisor.handoff.json")
+        generation = handoff.get("generation", 0)
+        if type(generation) is not int or not 0 <= generation < 1000000:
+            raise LifecycleError("invalid_handoff")
+        if action == "started" and handoff.get("state") != "pending":
+            raise LifecycleError("handoff_not_pending")
+        if action == "handoff" and handoff.get("state") == "active":
+            raise LifecycleError("supervisor_already_active")
+        if action == "rotate" or (action == "recover" and handoff.get("state") != "pending") or not generation:
+            generation += 1
+        state.update(mode="supervisor", **wake.outcome("skipped", "supervisor_handoff"))
+        # If interrupted between these writes, the webhook is still disabled and
+        # `next` will request a supervisor; never the other way around.
+        write_json(origin / "wake.json", state)
+        handoff = {"schema": 1, "state": "active" if action == "started" else "pending",
+                   "generation": generation, "updated_at": wake.utc_now()}
+        write_json(run / "supervisor.handoff.json", handoff)
+        return handoff
+
+
+def finish_wake(run):
+    """Results exist first; only the current lineage head can claim delivery.
+
+    The durable claim is never cleared, even on crash/failed delivery. Claiming
+    and supervisor ownership use the same lock; network I/O does not hold it.
+    """
+    run = Path(run)
+    origin = root_run(run)
+    with locked(origin / ".wake.lock"):
+        state = wake_state(run)
+        info = lineage(run)
+        head = info["attempts"][-1]["id"] if info["attempts"] else origin.name
+        if state["claimed"] or head != run.name:
+            return state
+        if state["mode"] != "webhook":
+            state.update(wake.outcome("skipped", "supervisor_handoff" if state["mode"] == "supervisor" else "wake_disabled"))
+            write_json(origin / "wake.json", state)
+            return state
+        meta = read_json(run / "meta.json")
+        status, agent = meta.get("status"), meta.get("agent")
+        if status not in {"ok", "error", "timeout", "rate_limited", "killed", "stalled"} or agent not in {"claude", "codex", "pi", "omp"}:
+            raise LifecycleError("terminal_state_missing")
+        _, error = wake.settings()
+        if error:
+            state.update(wake.outcome("skipped", error))
+            write_json(origin / "wake.json", state)
+            return state
+        reason = meta.get("error_kind")
+        if reason not in {"conn_error", "incomplete_output", "auth_error", "killed", "stall_terminal"}:
+            reason = status
+        ended = meta.get("ended_at")
+        if not isinstance(ended, str) or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", ended):
+            ended = wake.utc_now()
+        payload = {"event": "run_done", "run_id": run.name, "root_id": origin.name,
+                   "agent": agent, "status": status, "reason": reason,
+                   "ended_at": ended, "note": wake.NOTE}
+        state.update(claimed=True, run_id=run.name, ended_at=ended,
+                     **wake.outcome("sending", "delivery_claimed"))
+        write_json(origin / "wake.json", state)
+    delivered = wake.send_bounded(payload)
+    with locked(origin / ".wake.lock"):
+        state.update(delivered)
+        write_json(origin / "wake.json", state)
+    return state
 
 
 def inventory(run, initial=False):
@@ -193,6 +319,8 @@ def lineage(run):
 
 def plan(run, new_id=None, allow_extra=False):
     info = lineage(run)
+    if wake_state(run)["claimed"]:
+        raise LifecycleError("webhook_already_claimed")
     if len(info["attempts"]) >= AUTOMATIC_RESTARTS and not allow_extra:
         raise LifecycleError("restart_approval_required")
     reserved = {a["id"] for a in info["attempts"]}
@@ -216,10 +344,9 @@ def reserve(run, new_id=None, allow_extra=False):
     origin = root_run(run)
     # Serialize reservations across roots too: custom IDs share one namespace.
     # Never unlink the inode. A reservation is durable before child allocation.
-    fd = os.open(origin.parent / ".lineage.lock", os.O_RDWR | os.O_CREAT, 0o600)
-    with os.fdopen(fd, "r+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with locked(origin.parent / ".lineage.lock"):
         receipt = plan(run, new_id, allow_extra)
+        supervisor_handoff(run, "recover")
         ledger = lineage(run)
         ledger["attempts"].append(receipt)
         write_json(origin / "lineage.json", ledger)
@@ -262,8 +389,26 @@ def record_launch(run, values, inputs, effective_inputs):
             raise LifecycleError("invalid_run_lineage")
         receipt.update(matches[0])
         receipt["root_id"] = origin
+    requested = os.environ.get("GBA_WAKE_MODE", "auto")
+    if origin:
+        selected = wake_state(run)["mode"]
+    else:
+        config = read_json(Path(os.environ["GBA_LAUNCH_CONFIG"])) if os.environ.get("GBA_LAUNCH_CONFIG") else {}
+        selected = wake.select(requested, timeout_sec, config)
+        _, error = wake.settings() if selected == "webhook" else (None, None)
+        initial = wake.outcome("skipped", error) if error else wake.outcome("pending", "awaiting_completion")
+        with locked(run / ".wake.lock"):
+            if (run / "wake.json").exists() or (run / "wake.json").is_symlink():
+                # An early next/handoff may have claimed this run while workdir
+                # preparation was still in progress. Initialization is create-only.
+                selected = read_wake_state(run)["mode"]
+            else:
+                write_json(run / "wake.json", {"schema": 1, "mode": selected, "requested_mode": requested,
+                           "claimed": False, **initial})
+    receipt["wake_mode"] = selected
     write_json(run / "lifecycle.json", receipt)
-    write_json(run / "launch.json", {"schema": 2, "kind": kind, "agent": agent, "model": model,
+    write_json(run / "launch.json", {"schema": 2, "wake_mode": selected, "wake_requested": requested,
+               "kind": kind, "agent": agent, "model": model,
                "reasoning": reasoning, "permission": permission, "timeout_sec": timeout_sec,
                "cwd": str(Path(cwd).resolve()) if cwd else None,
                "prompt_file": str(Path(brief).resolve()) if brief else "prompt.md",
@@ -274,6 +419,10 @@ def record_launch(run, values, inputs, effective_inputs):
 def main():
     try:
         action, run = sys.argv[1], Path(sys.argv[2]).resolve()
+        if action in {"finish-wake", "supervisor-handoff"}:
+            value = finish_wake(run) if action == "finish-wake" else supervisor_handoff(run, "recover")
+            print(json.dumps(value, separators=(",", ":")))
+            return 0
         if action == "record-launch":
             count = int(sys.argv[11])
             if count < 0 or count > len(sys.argv[12:]):

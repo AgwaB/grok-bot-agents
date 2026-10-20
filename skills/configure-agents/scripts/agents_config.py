@@ -50,6 +50,7 @@ def default_config(enabled):
         "permission_mode": "full-auto",
         "worktree_per_task": True,
         "timeout_sec": 1800,
+        "wake_auto_max_sec": 600,
         "agents": {
             "claude": {"auth": "oauth", "model": None, "reasoning": None},
             "codex": {"auth": "oauth", "model": None, "reasoning": None},
@@ -128,6 +129,9 @@ def validate(cfg):
         e.append("worktree_per_task must stay true")
     if not isinstance(cfg.get("timeout_sec"), int) or cfg["timeout_sec"] <= 0:
         e.append("timeout_sec must be a positive int")
+    threshold = cfg.get("wake_auto_max_sec", 600)
+    if type(threshold) is not int or not 1 <= threshold <= 86400:
+        e.append("wake_auto_max_sec must be an int from 1 to 86400")
     for a, ac in cfg.get("agents", {}).items():
         if a not in AGENTS:
             e.append(f"agents: unknown agent {a}")

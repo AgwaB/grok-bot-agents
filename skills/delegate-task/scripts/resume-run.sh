@@ -75,11 +75,7 @@ fi
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=worktree_guard.sh
 source "$HERE/worktree_guard.sh"
-if [ -d "$OLD_WORKDIR" ]; then
-  OLD_WORKDIR="$(cd "$OLD_WORKDIR" && pwd -P)"
-  KILL_ARG=""; [ "$KILL" = 1 ] && KILL_ARG=--kill
-  guard_workdir "$OLD_WORKDIR" "$KILL_ARG" "$DRY" || exit $?
-fi
+[ ! -d "$OLD_WORKDIR" ] || OLD_WORKDIR="$(cd "$OLD_WORKDIR" && pwd -P)"
 
 # --- agent, model, reasoning of the old run ---
 RECOVERY=$(python3 - "$R" "$HERE" "$OLD_WORKDIR" 2>/dev/null <<'PY'
@@ -135,6 +131,19 @@ PY
 [ "$RC" = 0 ] || die "invalid_run_metadata" 6
 eval "$RECOVERY"
 [ -n "$AGENT" ] || die "cannot tell which agent ran $OLD_ID; pass -- --agent NAME"
+
+if [ -d "$OLD_WORKDIR" ]; then
+  KILL_ARG=""; [ "$KILL" = 1 ] && KILL_ARG=--kill
+  # Validate inputs and perform a write-free ownership preflight before any
+  # handoff. A refused recovery must not silently cancel a working webhook.
+  guard_workdir "$OLD_WORKDIR" "$KILL_ARG" 1 || exit $?
+  if [ "$DRY" = 0 ]; then
+    # Claim BEFORE stopping the old runner; its finalizer uses the same lock.
+    HANDOFF=$(python3 "$HERE/run_lifecycle.py" supervisor-handoff "$R"); RC=$?
+    [ "$RC" = 0 ] || { printf '%s\n' "$HANDOFF"; exit "$RC"; }
+    guard_workdir "$OLD_WORKDIR" "$KILL_ARG" 0 || exit $?
+  fi
+fi
 
 # Reserve only after ownership checks succeed. Reservations are never recycled:
 # startup failures and native-rejection fallbacks are real restart attempts too.
